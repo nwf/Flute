@@ -1,7 +1,22 @@
 
 // Copyright (c) 2017 Massachusetts Institute of Technology
 // Portions (c) 2020 Bluespec, Inc.
-// 
+//
+//-
+// RVFI_DII + CHERI modifications:
+//     Copyright (c) 2020 Alexandre Joannou
+//     Copyright (c) 2020 Peter Rugg
+//     Copyright (c) 2020 Jonathan Woodruff
+//     All rights reserved.
+//
+//     This software was developed by SRI International and the University of
+//     Cambridge Computer Laboratory (Department of Computer Science and
+//     Technology) under DARPA contract HR0011-18-C-0016 ("ECATS"), as part of the
+//     DARPA SSITH research programme.
+//
+//     This work was supported by NCSC programme grant 4212611/RFA 15971 ("SafeBet").
+//-
+//
 // Permission is hereby granted, free of charge, to any person
 // obtaining a copy of this software and associated documentation
 // files (the "Software"), to deal in the Software without
@@ -9,10 +24,10 @@
 // modify, merge, publish, distribute, sublicense, and/or sell copies
 // of the Software, and to permit persons to whom the Software is
 // furnished to do so, subject to the following conditions:
-// 
+//
 // The above copyright notice and this permission notice shall be
 // included in all copies or substantial portions of the Software.
-// 
+//
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
 // EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
 // MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
@@ -28,6 +43,14 @@ import Types::*;
 import FShow::*;
 import DefaultValue::*;
 import MemoryTypes::*;
+import CHERICap::*;
+import CHERICC_Fat::*;
+//import ISA_Decls_CHERI::*;
+import ISA_Decls::*;
+`ifdef RVFI_DII
+import GetPut::*;
+import RVFI_DII_Types::*;
+`endif
 
 typedef `NUM_CORES CoreNum;
 typedef Bit#(TLog#(CoreNum)) CoreId;
@@ -35,6 +58,8 @@ typedef Bit#(TLog#(CoreNum)) CoreId;
 typedef `sizeSup SupSize;
 typedef Bit#(TLog#(SupSize)) SupWaySel;
 typedef Bit#(TLog#(TAdd#(SupSize, 1))) SupCnt;
+typedef TMul#(SupSize, 2) SupSizeX2;
+typedef Bit#(TLog#(SupSizeX2)) SupWayX2Sel;
 
 typedef `NUM_EPOCHS NumEpochs;
 typedef Bit#(TLog#(NumEpochs)) Epoch;
@@ -57,7 +82,22 @@ typedef struct {
     SupWaySel way; // which way in superscalar
     SingleScalarPtr ptr; // pointer within a way
     InstTime t; // inst time in ROB (for dispatch in reservation station)
+`ifdef RVFI_DII
+    Dii_Parcel_Id dii_next_pid;
+`endif
 } InstTag deriving(Bits, Eq, FShow);
+
+`ifdef RVFI_DII
+typedef Vector#(SupSize, Maybe#(RVFI_DII_Execution #(64, 64))) Rvfi_Traces;
+typedef Vector#(TMul#(SupSize, 2), RVFI_DII_Parcel_Resp) Dii_Parcel_Resps;
+typedef Vector#(TMul#(SupSize, 2), Bit#(16)) Dii_Parcels;
+
+interface Toooba_RVFI_DII_Server;
+    interface Get#(Dii_Parcel_Id) seqReqFirst;
+    interface Put#(Dii_Parcel_Resps) parcelResps;
+    interface Get#(Rvfi_Traces) trace_report;
+endinterface
+`endif
 
 typedef `SB_SIZE SBSize;
 typedef Bit#(TLog#(SBSize)) SBIndex;
@@ -160,205 +200,64 @@ function Bool allRegsReady(RegsReady x);
     return x.src1 && x.src2 && x.src3 && x.dst;
 endfunction
 
-typedef enum {
-    Invalid = 7'b0,
-    Load    = 7'b0000011,
-    LoadFp  = 7'b0000111,
-    MiscMem = 7'b0001111,
-    OpImm   = 7'b0010011,
-    Auipc   = 7'b0010111,
-    OpImm32 = 7'b0011011,
-    Store   = 7'b0100011,
-    StoreFp = 7'b0100111,
-    Amo     = 7'b0101111,
-    Op      = 7'b0110011,
-    Lui     = 7'b0110111,
-    Op32    = 7'b0111011,
-    Fmadd   = 7'b1000011,
-    Fmsub   = 7'b1000111,
-    Fnmsub  = 7'b1001011,
-    Fnmadd  = 7'b1001111,
-    OpFp    = 7'b1010011,
-    Branch  = 7'b1100011,
-    Jalr    = 7'b1100111,
-    Jal     = 7'b1101111,
-    System  = 7'b1110011
-} Opcode deriving(Bits, Eq, FShow);
+typedef struct { Bit#(7) opc; } Opcode deriving(Bits, Eq);
 
-function Opcode unpackOpcode(Bit#(7) x);
-    return (case(x)
-        pack(Opcode'(Load   )): (Load   );
-        pack(Opcode'(LoadFp )): (LoadFp );
-        pack(Opcode'(MiscMem)): (MiscMem); 
-        pack(Opcode'(OpImm  )): (OpImm  );
-        pack(Opcode'(Auipc  )): (Auipc  );
-        pack(Opcode'(OpImm32)): (OpImm32);
-        pack(Opcode'(Store  )): (Store  );
-        pack(Opcode'(StoreFp)): (StoreFp);
-        pack(Opcode'(Amo    )): (Amo    );
-        pack(Opcode'(Op     )): (Op     );
-        pack(Opcode'(Lui    )): (Lui    );
-        pack(Opcode'(Op32   )): (Op32   );
-        pack(Opcode'(Fmadd  )): (Fmadd  );
-        pack(Opcode'(Fmsub  )): (Fmsub  );
-        pack(Opcode'(Fnmsub )): (Fnmsub );
-        pack(Opcode'(Fnmadd )): (Fnmadd );
-        pack(Opcode'(OpFp   )): (OpFp   );
-        pack(Opcode'(Branch )): (Branch );
-        pack(Opcode'(Jalr   )): (Jalr   );
-        pack(Opcode'(Jal    )): (Jal    );
-        pack(Opcode'(System )): (System );
-        default               : (Invalid);
+`define Opcode(n, v) Opcode opc``n = Opcode { opc: v };
+`include "Opcodes.bsvi"
+`Opcode(Invalid, 7'b0)
+`undef Opcode
+
+instance FShow#(Opcode);
+    function Fmt fshow(Opcode scr);
+        return (case(scr.opc)
+`define Opcode(n, v) v: $format(`"``opc``n```");
+`include "Opcodes.bsvi"
+`undef Opcode
+            default: $format("opcInvalid");
+        endcase);
+    endfunction
+endinstance
+
+function Opcode unpackOpcode(Bit#(7) opc);
+    return (case(opc)
+`define Opcode(n, v) v: opc``n;
+`include "Opcodes.bsvi"
+`undef Opcode
+        default: opcInvalid;
     endcase);
 endfunction
 
-typedef enum {
-    // user standard CSRs
-    CSRfflags     = 12'h001,
-    CSRfrm        = 12'h002,
-    CSRfcsr       = 12'h003,
-    CSRcycle      = 12'hc00,
-    CSRtime       = 12'hc01,
-    CSRinstret    = 12'hc02,
-    // user non-standard CSRs (TODO)
-    CSRterminate  = 12'h800, // terminate (used to exit Linux)
-    CSRstats      = 12'h801, // turn on/off perf counters
-    // supervisor standard CSRs
-    CSRsstatus    = 12'h100,
-    // no user trap handler, so no se/ideleg
-    CSRsie        = 12'h104,
-    CSRstvec      = 12'h105,
-    CSRscounteren = 12'h106,
-    CSRsscratch   = 12'h140,
-    CSRsepc       = 12'h141,
-    CSRscause     = 12'h142,
-    CSRstval      = 12'h143, // it's still called sbadaddr in spike
-    CSRsip        = 12'h144,
-    CSRsatp       = 12'h180, // it's still called sptbr in spike
-    // machine standard CSRs
-    CSRmstatus    = 12'h300,
-    CSRmisa       = 12'h301,
-    CSRmedeleg    = 12'h302,
-    CSRmideleg    = 12'h303,
-    CSRmie        = 12'h304,
-    CSRmtvec      = 12'h305,
-    CSRmcounteren = 12'h306,
-    CSRmscratch   = 12'h340,
-    CSRmepc       = 12'h341,
-    CSRmcause     = 12'h342,
-    CSRmtval      = 12'h343, // it's still called mbadaddr in spike
-    CSRmip        = 12'h344,
-    CSRmcycle     = 12'hb00,
-    CSRminstret   = 12'hb02,
-    CSRmvendorid  = 12'hf11,
-    CSRmarchid    = 12'hf12,
-    CSRmimpid     = 12'hf13,
-    CSRmhartid    = 12'hf14,
-`ifdef SECURITY
-    // sanctum machine CSR
-    CSRmevbase    = 12'h7c0,
-    CSRmevmask    = 12'h7c1,
-    CSRmeatp      = 12'h7c2,
-    CSRmmrbm      = 12'h7c3,
-    CSRmemrbm     = 12'h7c4,
-    CSRmparbase   = 12'h7c5,
-    CSRmparmask   = 12'h7c6,
-    CSRmeparbase  = 12'h7c7,
-    CSRmeparmask  = 12'h7c8,
-    CSRmflush     = 12'h7c9, // flush pipeline + cache
-    CSRmspec      = 12'h7ca, // control speculation
-    // sanctum user CSR
-    CSRtrng       = 12'hcc0, // random number for secure boot
-`endif
+typedef struct { Bit#(12) addr; } CSR deriving(Bits, Eq);
 
-   CSRtselect     = 12'h7A0,    // Debug/trace tselect
-   CSRtdata1      = 12'h7A1,    // Debug/trace tdata1
-   CSRtdata2      = 12'h7A2,    // Debug/trace tdata2
-   CSRtdata3      = 12'h7A3,    // Debug/trace tdata3
+`define CSR(n, v) CSR csrAddr``n = CSR { addr: v };
+`include "CSRs.bsvi"
+// CSR that catches all the unimplemented CSRs. To avoid exception on this,
+// make it a user non-standard read/write CSR.
+// Bluespec: in RenameStage.getTrap(), we force this to be a csr_access_trap
+`CSR(None, 12'h8ff)
+`undef CSR
 
-`ifdef INCLUDE_GDB_CONTROL
-   CSRdcsr        = 12'h7B0,    // Debug control and status
-   CSRdpc         = 12'h7B1,    // Debug PC
-   CSRdscratch0   = 12'h7B2,    // Debug scratch0
-   CSRdscratch1   = 12'h7B3,    // Debug scratch1
-`endif
+instance FShow#(CSR);
+    function Fmt fshow(CSR csr);
+        return (case(csr.addr)
+`define CSR(n, v) v: $format(`"``csrAddr``n```");
+`include "CSRs.bsvi"
+`undef CSR
+            default: $format("csrAddrNone");
+        endcase);
+    endfunction
+endinstance
 
-    // CSR that catches all the unimplemented CSRs. To avoid exception on this,
-    // make it a user non-standard read/write CSR.
-    // Bluespec: in RenameStage.getTrap(), we force this to be a csr_access_trap
-    CSRnone       = 12'h8ff
-} CSR deriving(Bits, Eq, FShow);
-
-function CSR unpackCSR(Bit#(12) x);
-    return (case(x)
-        pack(CSR'(CSRfflags    )): (CSRfflags    );
-        pack(CSR'(CSRfrm       )): (CSRfrm       );
-        pack(CSR'(CSRfcsr      )): (CSRfcsr      );
-        pack(CSR'(CSRcycle     )): (CSRcycle     );
-        pack(CSR'(CSRtime      )): (CSRtime      );
-        pack(CSR'(CSRinstret   )): (CSRinstret   );
-        pack(CSR'(CSRterminate )): (CSRterminate );
-        pack(CSR'(CSRstats     )): (CSRstats     );
-        pack(CSR'(CSRsstatus   )): (CSRsstatus   );
-        pack(CSR'(CSRsie       )): (CSRsie       );
-        pack(CSR'(CSRstvec     )): (CSRstvec     );
-        pack(CSR'(CSRscounteren)): (CSRscounteren);
-        pack(CSR'(CSRsscratch  )): (CSRsscratch  );
-        pack(CSR'(CSRsepc      )): (CSRsepc      );
-        pack(CSR'(CSRscause    )): (CSRscause    );
-        pack(CSR'(CSRstval     )): (CSRstval     );
-        pack(CSR'(CSRsip       )): (CSRsip       );
-        pack(CSR'(CSRsatp      )): (CSRsatp      );
-        pack(CSR'(CSRmstatus   )): (CSRmstatus   );
-        pack(CSR'(CSRmisa      )): (CSRmisa      );
-        pack(CSR'(CSRmedeleg   )): (CSRmedeleg   );
-        pack(CSR'(CSRmideleg   )): (CSRmideleg   );
-        pack(CSR'(CSRmie       )): (CSRmie       );
-        pack(CSR'(CSRmtvec     )): (CSRmtvec     );
-        pack(CSR'(CSRmcounteren)): (CSRmcounteren);
-        pack(CSR'(CSRmscratch  )): (CSRmscratch  );
-        pack(CSR'(CSRmepc      )): (CSRmepc      );
-        pack(CSR'(CSRmcause    )): (CSRmcause    );
-        pack(CSR'(CSRmtval     )): (CSRmtval     );
-        pack(CSR'(CSRmip       )): (CSRmip       );
-        pack(CSR'(CSRmcycle    )): (CSRmcycle    );
-        pack(CSR'(CSRminstret  )): (CSRminstret  );
-        pack(CSR'(CSRmvendorid )): (CSRmvendorid );
-        pack(CSR'(CSRmarchid   )): (CSRmarchid   );
-        pack(CSR'(CSRmimpid    )): (CSRmimpid    );
-        pack(CSR'(CSRmhartid   )): (CSRmhartid   );
-`ifdef SECURITY
-        pack(CSR'(CSRmevbase   )): (CSRmevbase   );
-        pack(CSR'(CSRmevmask   )): (CSRmevmask   );
-        pack(CSR'(CSRmeatp     )): (CSRmeatp     );
-        pack(CSR'(CSRmmrbm     )): (CSRmmrbm     );
-        pack(CSR'(CSRmemrbm    )): (CSRmemrbm    );
-        pack(CSR'(CSRmparbase  )): (CSRmparbase  );
-        pack(CSR'(CSRmparmask  )): (CSRmparmask  );
-        pack(CSR'(CSRmeparbase )): (CSRmeparbase );
-        pack(CSR'(CSRmeparmask )): (CSRmeparmask );
-        pack(CSR'(CSRmflush    )): (CSRmflush    );
-        pack(CSR'(CSRmspec     )): (CSRmspec     );
-        pack(CSR'(CSRtrng      )): (CSRtrng      );
-`endif
-
-        pack(CSR'(CSRtselect   )): (CSRtselect   );
-        pack(CSR'(CSRtdata1    )): (CSRtdata1    );
-        pack(CSR'(CSRtdata2    )): (CSRtdata2    );
-        pack(CSR'(CSRtdata3    )): (CSRtdata3    );
-
-`ifdef INCLUDE_GDB_CONTROL
-        pack(CSR'(CSRdcsr      )): (CSRdcsr      );
-        pack(CSR'(CSRdpc       )): (CSRdpc       );
-        pack(CSR'(CSRdscratch0 )): (CSRdscratch0 );
-        pack(CSR'(CSRdscratch1 )): (CSRdscratch1 );
-`endif
-
-        default                  : (CSRnone      );
+function CSR unpackCSR(Bit#(12) addr);
+    return (case(addr)
+`define CSR(n, v) v: csrAddr``n;
+`include "CSRs.bsvi"
+`undef CSR
+        default: csrAddrNone;
     endcase);
 endfunction
 
-// values for CSRmspec
+// values for MSPEC CSR
 Bit#(2) mSpecAll    = 0; // every inst can speculate
 Bit#(2) mSpecNonMem = 1; // only non-memory inst can speculate
 Bit#(2) mSpecNone   = 2; // no inst can speculate
@@ -370,9 +269,12 @@ typedef enum {
     Alu,
     Ld, St, Lr, Sc,
     J, Jr, Br,
+    CCall, CJALR, Cap,
     Auipc,
+    Auipcc,
     Fpu,
     Csr,
+    Scr,
     Fence,
     FenceI, SFence,
     Ecall, Ebreak,
@@ -392,6 +294,65 @@ typedef enum {
     Slt, Sltu, Sll, Sllw, Sra, Sraw, Srl, Srlw,
     Csrw, Csrs, Csrc
 } AluFunc deriving(Bits, Eq, FShow);
+
+typedef enum {
+    SetOffset, IncOffset
+} ModifyOffsetFunc deriving(Bits, Eq, FShow);
+
+typedef enum {
+    SetBounds, CRRL, CRAM
+} SetBoundsFunc deriving(Bits, Eq, FShow);
+
+typedef enum {
+    Write, Set, Clear
+} CSRAccessFunc deriving(Bits, Eq, FShow);
+
+typedef union tagged {
+    CSRAccessFunc TVEC;
+    CSRAccessFunc EPC;
+    void TCC;
+    void EPCC;
+    void Normal;
+} SpecialRWFunc deriving(Bits, Eq, FShow);
+
+typedef enum {
+    Src1Type, Src1Addr
+} AddrSource deriving(Bits, Eq, FShow);
+
+typedef enum {
+    Src1, Src2
+} SrcSelector deriving(Bits, Eq, FShow);
+
+typedef union tagged {
+    ModifyOffsetFunc ModifyOffset;
+    SetBoundsFunc SetBounds;
+    SpecialRWFunc SpecialRW;
+    AddrSource SetAddr;
+    void Seal;
+    void SealEntry;
+    SrcSelector Unseal;
+    void AndPerm;
+    void SetFlags;
+    void BuildCap;
+    void Move;
+    void ClearTag;
+    void FromPtr;
+} CapModifyFunc deriving(Bits, Eq, FShow);
+
+typedef union tagged {
+    void TestSubset;
+    void CSub;
+    void GetLen;
+    void GetBase;
+    void GetTag;
+    void GetSealed;
+    void GetAddr;
+    void GetOffset;
+    void GetFlags;
+    void GetPerm;
+    void GetType;
+    void ToPtr;
+} CapInspectFunc deriving(Bits, Eq, FShow);
 
 typedef enum {Mul, Mulh, Div, Rem} MulDivFunc deriving(Bits, Eq, FShow);
 
@@ -438,62 +399,74 @@ typedef union tagged {
     void        Other;
 } ExecFunc deriving(Bits, Eq, FShow);
 
+typedef union tagged {
+    CapInspectFunc CapInspect;
+    CapModifyFunc  CapModify;
+    void           Other;
+} CapFunc deriving(Bits, Eq, FShow);
+
 // Rounding Modes (encoding by risc-v, not general fpu)
-typedef enum {
-    RNE  = 3'b000,
-    RTZ  = 3'b001,
-    RDN  = 3'b010,
-    RUP  = 3'b011,
-    RMM  = 3'b100,
-    RDyn = 3'b111
-} RVRoundMode deriving(Bits, Eq, FShow);
+typedef struct { Bit#(3) mode; } RVRoundMode deriving(Bits, Eq);
 
-typedef enum {
-    InstAddrMisaligned  = 4'd0,
-    InstAccessFault     = 4'd1,
-    IllegalInst         = 4'd2,
-    Breakpoint          = 4'd3,
-    LoadAddrMisaligned  = 4'd4,
-    LoadAccessFault     = 4'd5,
-    StoreAddrMisaligned = 4'd6,
-    StoreAccessFault    = 4'd7,
-    EnvCallU            = 4'd8,
-    EnvCallS            = 4'd9,
-    EnvCallM            = 4'd11,
-    InstPageFault       = 4'd12,
-    LoadPageFault       = 4'd13,
-    StorePageFault      = 4'd15
-} Exception deriving(Bits, Eq, FShow);
+`define RVRoundMode(n, v) RVRoundMode rm``n = RVRoundMode { mode: v };
+`include "RVRoundModes.bsvi"
+`undef RVRoundMode
 
-typedef enum {
-    UserSoftware       = 4'd0,
-    SupervisorSoftware = 4'd1,
-    MachineSoftware    = 4'd3,
-    UserTimer          = 4'd4,
-    SupervisorTimer    = 4'd5,
-    MachineTimer       = 4'd7,
-    UserExternal       = 4'd8,
-    SupervisorExternel = 4'd9,
-    MachineExternal    = 4'd11
+instance FShow#(RVRoundMode);
+    function Fmt fshow(RVRoundMode rm);
+        return (case(rm.mode)
+`define RVRoundMode(n, v) v: $format(`"``rm``n```");
+`include "RVRoundModes.bsvi"
+`undef RVRoundMode
+            default: $format("rmUnknown");
+        endcase);
+    endfunction
+endinstance
 
-`ifdef INCLUDE_GDB_CONTROL
-  , DebugHalt          = 4'd14,        // Debugger halt command (^C in GDB)
-    DebugStep          = 4'd15         // dcsr.step is set and 1 instr has been processed
-`endif
+// bsc doesn't like the name colliding with Trap's Exception
+typedef struct { Bit#(5) code; } ExceptionS deriving(Bits, Eq);
+typedef ExceptionS Exception;
 
-} Interrupt deriving(Bits, Eq, FShow);
+`define Exception(n, v) Exception exc``n = ExceptionS { code: v };
+`include "Exceptions.bsvi"
+`undef Exception
+
+instance FShow#(Exception);
+    function Fmt fshow(Exception exc);
+        return (case(exc.code)
+`define Exception(n, v) v: $format(`"``exc``n```");
+`include "Exceptions.bsvi"
+`undef Exception
+            default: $format("excUnknown");
+        endcase);
+    endfunction
+endinstance
+
+// bsc doesn't like the name colliding with Trap's Interrupt and IType's
+// Interrupt.
+typedef struct { Bit#(4) intr; } InterruptS deriving(Bits, Eq);
+typedef InterruptS Interrupt;
+
+`define Interrupt(n, v) Interrupt intr``n = InterruptS { intr: v };
+`include "Interrupts.bsvi"
+`undef Interrupt
+
+instance FShow#(Interrupt);
+    function Fmt fshow(Interrupt intr);
+        return (case(intr.intr)
+`define Interrupt(n, v) v: $format(`"``intr``n```");
+`include "Interrupts.bsvi"
+`undef Interrupt
+            default: $format("intrUnknown");
+        endcase);
+    endfunction
+endinstance
 
 `ifdef INCLUDE_GDB_CONTROL
 typedef 16 InterruptNum;    // With debugger
 `else
 typedef 12 InterruptNum;    // Without debugger
 `endif
-
-// Traps are either an exception or an interrupt
-typedef union tagged {
-    Exception Exception;
-    Interrupt Interrupt;
-} Trap deriving(Bits, Eq, FShow);
 
 // privilege modes
 Bit#(2) prvU = 0;
@@ -583,9 +556,10 @@ typedef struct {
 } Redirect deriving (Bits, Eq, FShow);
 
 typedef struct {
-    Addr pc;
-    Addr nextPc;
+    CapPipe pc;
+    CapPipe nextPc;
     Bool taken;
+    Bool newPcc;
     Bool mispredict;
 } ControlFlow deriving (Bits, Eq, FShow);
 
@@ -595,12 +569,85 @@ typedef struct {
     Bool        illegalInst;
 } DecodeResult deriving(Bits, Eq, FShow);
 
+typedef enum {
+    Src1,
+    Src2,
+    Pcc,
+    Ddc
+} CheckAuthoritySrc deriving(Bits, Eq, FShow);
+
+typedef enum {
+    Src1Addr,
+    Src1Base,
+    Src1Type,
+    Src2Addr,
+    Vaddr    // Memory Pipe
+} CheckLowSrc deriving(Bits, Eq, FShow);
+
+typedef enum {
+    Src1AddrPlus2,
+    Src1Top,
+    Src1Type,
+    Src2Addr,
+    ResultTop,
+    VaddrPlusSize // Memory Pipe
+} CheckHighSrc deriving(Bits, Eq, FShow);
+
+typedef struct {
+    Data authority_base;
+    CapTop authority_top;
+    Bit#(6) authority_idx;
+    Data check_low;
+    CapTop check_high;
+    Bool check_inclusive;
+} BoundsCheck deriving(Bits, Eq, FShow);
+
+typedef Bit#(65) CapTop;
+
 typedef Bit#(32) ImmData; // 32-bit decoded immediate data
+
+typedef struct {
+`define CAP_CHECK_FIELD(x,s) Bool x;
+`include "CapChecks.bsvi"
+`undef CAP_CHECK_FIELD
+
+    Bool check_enable;
+    CheckAuthoritySrc check_authority_src;
+    CheckLowSrc check_low_src;
+    CheckHighSrc check_high_src;
+    Bool check_inclusive;
+
+    Bit#(6) rn1;
+    Bit#(6) rn2;
+} CapChecks deriving(Bits, Eq);
+
+instance FShow#(CapChecks);
+    function Fmt fshow(CapChecks x);
+        let ret = $format("CapChecks {",
+            "rn1 ", fshow(x.rn1), ", rn2 ", fshow(x.rn2));
+
+`define CAP_CHECK_FIELD(f,s) if (x.f) ret = ret + $format(", ", s);
+`include "CapChecks.bsvi"
+`undef CAP_CHECK_FIELD
+
+        if (x.check_enable)
+            ret = $format(ret, ", bounds check: ",
+                "auth ", fshow(x.check_authority_src), ", ",
+                "low ",  fshow(x.check_low_src), ", ",
+                "high ", fshow(x.check_high_src), ", ",
+                "inclusive ", fshow(x.check_inclusive));
+
+        return $format(ret, "}");
+    endfunction
+endinstance
 
 typedef struct {
     IType           iType;
     ExecFunc        execFunc;
+    CapFunc         capFunc;
+    CapChecks       capChecks;
     Maybe#(CSR)     csr;
+    Maybe#(Bit #(5))     scr; // Special Capability Register.//XXXtypedef Bit #(5) SCR;
     Maybe#(ImmData) imm;
 } DecodedInst deriving(Bits, Eq, FShow);
 
@@ -608,17 +655,10 @@ function Maybe#(Data) getDInstImm(DecodedInst dInst);
     return dInst.imm matches tagged Valid .d ? Valid (signExtend(d)) : Invalid;
 endfunction
 
-typedef struct {
-    Data        data;
-    Data        csrData;
-    Addr        addr;
-    ControlFlow controlFlow;
-} ExecResult deriving(Bits, Eq, FShow);
-
 // MMIO
 typedef union tagged {
     // inst fetch: contains the maximum superscaler way to fetch
-    SupWaySel Inst;
+    SupWayX2Sel Inst;
     // data access
     void Ld;
     void St;
@@ -633,10 +673,10 @@ typedef struct {
     // this. We need this for to remove redundant MMIO accesses (for MSIP), and
     // to determine AMO access range (upper 32 bits, lower 32 bits, or full 64
     // bits). INST FETCH will not specify this field.
-    ByteEn byteEn;
+    MemDataByteEn byteEn;
     // For STORE: this is store data shifted to be 64-bit aligned
     // For AMO: this is UNshifted data (like normal mem req)
-    Data data;
+    MemTaggedData data;
 } MMIOCRq deriving(Bits, Eq, FShow);
 
 // resp from platform to core
@@ -648,13 +688,13 @@ typedef struct {
     // shift the result before writting back to reg).
     // For AMO: this is the result that can be directly written into reg, i.e.,
     // for 32-bit access, the result has been shifted and sign-extended.
-    Data data;
+    MemTaggedData data;
 } MMIODataPRs deriving(Bits, Eq, FShow);
 
 typedef union tagged {
     // Resp for INST fetch. A vector entry can be invalid for two reasons: 1)
     // that entry is not requested, 2) that entry is access fault.
-    Vector#(SupSize, Maybe#(Instruction)) InstFetch;
+    Vector#(SupSizeX2, Maybe#(Instruction16)) InstFetch;
     // Resp for DATA access, i.e. LOAD, STORE and AMO
     MMIODataPRs DataAccess;
 } MMIOPRs deriving(Bits, Eq, FShow);
@@ -680,7 +720,7 @@ typedef struct {
 
 // Boot rom: each block is 64-bit data
 typedef `LOG_BOOT_ROM_BYTES LgBootRomBytes;
-typedef TSub#(LgBootRomBytes, TLog#(NumBytes)) LgBootRomSzData;
+typedef TSub#(LgBootRomBytes, TLog#(MemDataBytes)) LgBootRomSzData;
 typedef Bit#(LgBootRomSzData) BootRomIndex;
 
 // mtime: we increment mtime by 50 every 5000 cycles, this simulates a
@@ -767,6 +807,7 @@ Bit#(5) opFCVT_FW = 5'b11010;
 //MiscMem
 Bit#(3) fnFENCE  = 3'b000;
 Bit#(3) fnFENCEI = 3'b001;
+Bit#(3) fnLC     = 3'b010;
 
 // System
 Bit#(3) fnPRIV   = 3'b000;
@@ -788,7 +829,7 @@ Bit#(7) privSFENCEVMA  = 7'h9;
 
 function Bool isSystem(IType iType) = (
     iType == Unsupported || iType == Interrupt ||
-    iType == Ecall || iType == Ebreak || iType == Csr ||
+    iType == Ecall || iType == Ebreak || iType == Csr || iType == Scr ||
     iType == SFence || iType == FenceI ||
     iType == Sret || iType == Mret
 );
@@ -820,7 +861,7 @@ function Fmt showInst(Instruction inst);
   Bit#(32) immJ   = signExtend({ inst[31], inst[19:12], inst[20], inst[30:25], inst[24:21], 1'b0});
 
   case (opcode)
-    OpImm:
+    opcOpImm:
     begin
       ret = case (funct3)
         fnADD: fshow("addi");
@@ -839,7 +880,7 @@ function Fmt showInst(Instruction inst);
       endcase);
     end
 
-    OpImm32:
+    opcOpImm32:
     begin
       ret = case (funct3)
         fnADD: fshow("addiw");
@@ -853,7 +894,7 @@ function Fmt showInst(Instruction inst);
       endcase);
     end
 
-    Op:
+    opcOp:
     begin
       ret = case (funct3)
         fnADD: (immI[10] == 0 ? fshow("add") : fshow("sub"));
@@ -868,7 +909,7 @@ function Fmt showInst(Instruction inst);
       ret = ret + fshow(" ") + fshow(rd) + fshow(" = ") + fshow(rs1) + fshow(" ") + fshow(rs2);
     end
 
-    Op32:
+    opcOp32:
     begin
       ret = case (funct3)
         fnADD: (immI[10] == 0 ? fshow("addw") : fshow("subw"));
@@ -878,19 +919,19 @@ function Fmt showInst(Instruction inst);
       ret = ret + fshow(" ") + fshow(rd) + fshow(" = ") + fshow(rs1) + fshow(" ") + fshow(rs2);
     end
 
-    Lui:
+    opcLui:
       ret = fshow("lui ") + fshow(rd) + fshow(" ") + fshow(immU);
 
-    Auipc:
+    opcAuipc:
       ret = fshow("auipc ") + fshow(rd) + fshow(" ") + fshow(immU);
 
-    Jal:
+    opcJal:
       ret = fshow("jal ") + fshow(rd) + fshow(" ") + fshow(immJ);
 
-    Jalr:
+    opcJalr:
       ret = fshow("jalr ") + fshow(rd) + fshow(" ") + fshow(rs1) + fshow(" ") + fshow(immI);
 
-    Branch:
+    opcBranch:
     begin
       ret = case(funct3)
         fnBEQ: fshow("beq");
@@ -903,7 +944,7 @@ function Fmt showInst(Instruction inst);
       ret = ret + fshow(" ") + fshow(rs1) + fshow(" ") + fshow(rs2) + fshow(" ") + fshow(immB);
     end
 
-    Load:
+    opcLoad:
     begin
       ret = case(funct3)
         fnLB: fshow("lb");
@@ -917,7 +958,7 @@ function Fmt showInst(Instruction inst);
       ret = ret + fshow(" ") + fshow(rd) + fshow(" = ") + fshow(rs1) + fshow(" ") + fshow(immI);
     end
 
-    Store:
+    opcStore:
     begin
       ret = case(funct3)
         fnSB: fshow("sb");
@@ -928,7 +969,7 @@ function Fmt showInst(Instruction inst);
       ret = ret + fshow(" ") + fshow(rs1) + fshow(" ") + fshow(rs2) + fshow(" ") + fshow(immS);
     end
 
-    MiscMem:
+    opcMiscMem:
     begin
       ret = case (funct3)
         fnFENCE: fshow("fence");
@@ -936,7 +977,7 @@ function Fmt showInst(Instruction inst);
       endcase;
     end
 
-    System:
+    opcSystem:
     begin
       case (funct3)
         fnCSRRW, fnCSRRS, fnCSRRC, fnCSRRWI, fnCSRRSI, fnCSRRCI:
@@ -962,7 +1003,7 @@ function Fmt showInst(Instruction inst);
             privMRET: fshow("mret");
             privWFI: fshow("wfi");
             default: (
-              funct7 == privSFENCEVMA ? 
+              funct7 == privSFENCEVMA ?
               (fshow("sfence.vma ") + fshow(rs1) + fshow(" ") + fshow(rs2)) :
               fshow("SYSTEM not implemented")
             );
@@ -980,3 +1021,4 @@ function Fmt showInst(Instruction inst);
   return ret;
 endfunction
 
+function x addPc(x cap, Bit#(12) inc) provisos (Add#(f, 12, c), CHERICap::CHERICap#(x, a, b, c, d, e)) = setAddrUnsafe(cap, getAddr(cap) + signExtend(inc));

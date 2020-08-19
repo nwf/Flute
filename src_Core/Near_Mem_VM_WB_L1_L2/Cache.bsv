@@ -55,8 +55,8 @@ deriving (Bits, Eq, FShow);
 
 typedef struct {
    Cache_Result_Type  outcome;
-   Bit #(64)          final_ld_val;
-   Bit #(64)          final_st_val;
+   Tuple2#(Bool, CWord) final_ld_val;
+   Tuple2#(Bool, CWord) final_st_val;
    } Cache_Result
 deriving (Bits, FShow);
 
@@ -138,7 +138,7 @@ deriving (Bits, FShow);
 typedef Vector #(Ways_per_CSet, Meta)  CSet_Meta;
 
 // A CSet of CWords
-typedef Vector #(Ways_per_CSet, Bit #(64)) CSet_CWord;
+typedef Vector #(Ways_per_CSet, Cache_Entry) CWord_Set;
 
 function PA fn_cline_pa_from_tag_and_cset_in_cache (CTag  ctag, CSet_in_Cache  cset_in_cache);
    Byte_in_CLine byte_in_cline = 0;
@@ -160,12 +160,12 @@ function Fmt fshow_cset_meta (CSet_in_Cache  cset_in_cache,
    return fmt;
 endfunction
 
-function Fmt fshow_cset_cword (CSet_CWord cset_cword);
-   Fmt fmt = $format ("CSet_Cword {");
+function Fmt fshow_cset_cword (CWord_Set cword_set);
+   Fmt fmt = $format ("CWord_Set {");
    for (Integer j = 0; j < ways_per_cset; j = j + 1) begin
       if (j != 0)
 	 fmt = fmt + $format (", ");
-      fmt = fmt + $format ("%0h", cset_cword [j]);
+      fmt = fmt + $format ("%0h", cword_set [j]);
    end
    fmt = fmt + $format ("}");
    return fmt;
@@ -218,60 +218,83 @@ endfunction
 typedef struct {
    Bit #(2)     num_valids;     // # of hits in set (should be 0 or 1; error if > 1)
    Meta_State   valid_state;    // M, E, S, I
-   Bit #(64)    data;           // if valid
+   Cache_Entry  data;           // if valid
    Way_in_CSet  way;            // if valid (for subsequent updates)
    } Valid_Info
 deriving (Bits, Eq, FShow);
 
 // ----------------------------------------------------------------
-// Update a byte, halfword, word or doubleword in a CWord at Way in a CSet_CWord
+// Update a byte, halfword, word or doubleword in a CWord at Way in a CWord_Set
 
-function CSet_CWord fn_update_cset_cword (CSet_CWord   old_cset_cword,
-					  Way_in_CSet   way,
-					  Bit #(n)      addr,
-					  Bit #(3)      f3,
-					  Bit #(64)     cword);
-   let old_cword = old_cset_cword [way];
-   let old_B0    = old_cword [7:0];
-   let old_B1    = old_cword [15:8];
-   let old_B2    = old_cword [23:16];
-   let old_B3    = old_cword [31:24];
-   let old_B4    = old_cword [39:32];
-   let old_B5    = old_cword [47:40];
-   let old_B6    = old_cword [55:48];
-   let old_B7    = old_cword [63:56];
+function CWord_Set fn_update_cword_set (CWord_Set   old_cword_set,
+					Way_in_CSet way,
+					Bit #(n)    addr,
+					Bit #(3)    width_code,
+					Tuple2 #(Bool, CWord) write)
+   provisos (Add#(_, 64, SizeOf #(CWord)));
+   match {.tag, .cword} = write;
 
-   let new_cset_cword = old_cset_cword;
-   let new_cword      = old_cword;
-   Bit #(3) addr_lsbs = addr [2:0];
+   let old_cword    = old_cword_set [way];
+
+   let new_cword_set = old_cword_set;
+   CWord new_cword     = tpl_2(old_cword);
+
+   Bit #(4) addr_lsbs  = addr [3:0];
 
    // Replace relevant bytes in new_cword
-   case (f3)
-      f3_SB:  case (addr_lsbs)
-		 'h0 : new_cword [ 7:0 ] = cword [7:0];
-		 'h1 : new_cword [15:8 ] = cword [7:0];
-		 'h2 : new_cword [23:16] = cword [7:0];
-		 'h3 : new_cword [31:24] = cword [7:0];
-		 'h4 : new_cword [39:32] = cword [7:0];
-		 'h5 : new_cword [47:40] = cword [7:0];
-		 'h6 : new_cword [55:48] = cword [7:0];
-		 'h7 : new_cword [63:56] = cword [7:0];
-	      endcase
-      f3_SH:  case (addr_lsbs)
-		 'h0 : new_cword [15:0 ] = cword [15:0];
-		 'h2 : new_cword [31:16] = cword [15:0];
-		 'h4 : new_cword [47:32] = cword [15:0];
-		 'h6 : new_cword [63:48] = cword [15:0];
-	      endcase
-      f3_SW:  case (addr_lsbs)
-		 'h0 : new_cword [31:0]  = cword [31:0];
-		 'h4 : new_cword [63:32] = cword [31:0];
-	      endcase
-      f3_SD:  new_cword = cword;
+   case (width_code)
+      0:  case (addr_lsbs)
+            'h0 : new_cword [ 7:0 ] = cword [7:0];
+            'h1 : new_cword [15:8 ] = cword [7:0];
+            'h2 : new_cword [23:16] = cword [7:0];
+            'h3 : new_cword [31:24] = cword [7:0];
+            'h4 : new_cword [39:32] = cword [7:0];
+            'h5 : new_cword [47:40] = cword [7:0];
+            'h6 : new_cword [55:48] = cword [7:0];
+            'h7 : new_cword [63:56] = cword [7:0];
+            'h8 : new_cword [71:64] = cword [7:0];
+            'h9 : new_cword [79:72] = cword [7:0];
+            'ha : new_cword [87:80] = cword [7:0];
+            'hb : new_cword [95:88] = cword [7:0];
+            'hc : new_cword [103:96] = cword [7:0];
+            'hd : new_cword [111:104] = cword [7:0];
+            'he : new_cword [119:112] = cword [7:0];
+            'hf : new_cword [127:120] = cword [7:0];
+        endcase
+      1:  case (addr_lsbs)
+            'h0 : new_cword [15:0 ] = cword [15:0];
+            'h2 : new_cword [31:16] = cword [15:0];
+            'h4 : new_cword [47:32] = cword [15:0];
+            'h6 : new_cword [63:48] = cword [15:0];
+            'h8 : new_cword [79:64] = cword [15:0];
+            'ha : new_cword [95:80] = cword [15:0];
+            'hc : new_cword [111:96] = cword [15:0];
+            'he : new_cword [127:112] = cword [15:0];
+        endcase
+      2:  case (addr_lsbs)
+            'h0 : new_cword [31:0] = cword [31:0];
+            'h4 : new_cword [63:32] = cword [31:0];
+            'h8 : new_cword [95:64] = cword [31:0];
+            'hc : new_cword [127:96] = cword [31:0];
+        endcase
+      3:  case (addr_lsbs)
+            'h0 : new_cword[63:0] = cword[63:0];
+            'h8 : new_cword[127:64] = cword[63:0];
+        endcase
+      4:  begin
+            new_cword[127:0] = cword;
+          end
    endcase
-   new_cset_cword [way] = new_cword;
-   return new_cset_cword;
-endfunction: fn_update_cset_cword
+
+   Bit#(Cache_Cap_Tag_Width) tags = tpl_1(old_cword);
+
+   //We assume that caps are the widest write width on the processor
+   let overwritten_idx = addr_lsbs >> valueOf(TLog#(TDiv#(CLEN,8)));
+   tags[overwritten_idx] = width_code == w_SIZE_CAP ? pack(tag) : 0;
+
+   new_cword_set [way] = tuple2(tags, new_cword);
+   return new_cword_set;
+endfunction: fn_update_cword_set
 
 // ================================================================
 // MODULE IMPLEMENTATION
@@ -294,9 +317,9 @@ module mkCache #(parameter Bool      dcache_not_icache,
    Reg #(WordXL)   rg_va         <- mkRegU;
 
    Reg #(CacheOp)  rg_cache_op   <- mkRegU;
-   Reg #(Bit #(3)) rg_f3         <- mkRegU;
+   Reg #(Bit #(3)) rg_width_code         <- mkRegU;
 `ifdef ISA_A
-   Reg #(Bit #(7)) rg_amo_funct7 <- mkRegU;
+   Reg #(Bit #(5)) rg_amo_funct5 <- mkRegU;
 `endif
 
    // Phys addr
@@ -313,7 +336,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
    // Data RAM
    // Note: a cset_cword is addressed by { cset_in_cache, cword_in_cline },
    BRAM_DUAL_PORT #(CSet_CWord_in_Cache,
-		    CSet_CWord)         ram_cset_cword <- mkBRAMCore2 (cset_cwords_per_cache,
+		    CWord_Set)         ram_cset_cword <- mkBRAMCore2 (cset_cwords_per_cache,
 								       bram_with_output_reg);
 
    // ----------------
@@ -324,6 +347,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
    Reg #(PA)         rg_lrsc_pa    <- mkRegU;    // Phys. address for an active LR
    Reg #(MemReqSize) rg_lrsc_size  <- mkRegU;
 `endif
+
 
    // ----------------
    // State for choosing next eviction victim
@@ -348,7 +372,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
    FIFOF #(L2_to_L1_Rsp)  f_L2_to_L1_rsps <- mkFIFOF;
 
    // Buffer to hold a cache line from next-level during refill
-   Reg #(Vector #(CWords_per_CLine, Bit #(64))) rg_read_cline_buf <- mkRegU;
+   Reg #(Vector #(CWords_per_CLine, Cache_Entry)) rg_read_cline_buf <- mkRegU;
 
    // ----------------
    // Requests/responses from next-level cache or Memory (for downgrades and writebacks)
@@ -357,7 +381,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
    FIFOF #(L1_to_L2_Rsp)  f_L1_to_L2_rsps <- mkFIFOF;
 
    // Buffer to hold a cache line to next-level during writeback
-   Reg #(Vector #(CWords_per_CLine, Bit #(64))) rg_write_cline_buf <- mkRegU;
+   Reg #(Vector #(CWords_per_CLine, Cache_Entry)) rg_write_cline_buf <- mkRegU;
 
    // ****************************************************************
    // ****************************************************************
@@ -388,7 +412,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
       Bit #(2)     num_valids  = 0;
       Meta_State   valid_state = META_INVALID;    // M, E, S, I
       Way_in_CSet  way_hit     = 0;
-      Bit #(64)    cword       = 0;
+	  Cache_Entry centry  = unpack (0);
 
       CTag  pa_ctag = fn_PA_to_CTag (pa);
 
@@ -401,13 +425,13 @@ module mkCache #(parameter Bool      dcache_not_icache,
 	    way_hit     = fromInteger (way);
 	 end
 
-	 let cword_at_way = ram_A_cset_cword [way];
-	 cword  = (cword | (cword_at_way & pack (replicate (hit_at_way))));
+	 let centry_at_way = ram_A_cset_cword [way];
+	 centry = unpack (pack (centry) | (pack (centry_at_way) & pack (replicate (hit_at_way))));
       end
 
       return Valid_Info {num_valids:  num_valids,
 			 valid_state: valid_state,
-			 data:        cword,
+			 data:        centry,
 			 way:         way_hit};    // For possible subsequent update
    endfunction
 
@@ -435,7 +459,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
    // ****************************************************************
    // ****************************************************************
    // Write actions on a cache hit
-   function Action fa_write (PA pa, Bit #(3) f3, Bit #(64) st_value);
+   function Action fa_write (PA pa, Bit #(3) width_code, Tuple2 #(Bool, CWord) st_value);
       action
 	 let valid_info = fv_ram_A_valid_info (pa);
 	 let way        = valid_info.way;
@@ -446,22 +470,22 @@ module mkCache #(parameter Bool      dcache_not_icache,
 	     || (valid_info.valid_state < META_SHARED))
 	    begin
 	       $display ("%0d: %m.fa_write: INTERNAL_ERROR", cur_cycle);
-	       $display ("    va_cset_cword_in_cache %0h way %0d pa %0h f3 %0d st_value %0h",
-			 va_cset_cword_in_cache, way, pa, f3, st_value);
+	       $display ("    va_cset_cword_in_cache %0h way %0d pa %0h width_code %0d st_value %0h",
+			 va_cset_cword_in_cache, way, pa, width_code, st_value);
 	       $display ("    Cache write on a miss (need EXCLUSIVE)");
 	       $finish (1);
 	    end
 
 	 // Update cache line data
-	 let new_cset_cword = fn_update_cset_cword (ram_A_cset_cword,
+	 let new_cset_cword = fn_update_cword_set (ram_A_cset_cword,
 						    way,
 						    pa,
-						    f3,
+						    width_code,
 						    st_value);
 	 ram_cset_cword.b.put (bram_cmd_write, va_cset_cword_in_cache, new_cset_cword);
 	 if (verbosity >= 1) begin
-	    $display ("      cache.fa_write: va_cset_cword_in_cache %0h way %0d pa %0h f3 %0d st_value %0h",
-		      va_cset_cword_in_cache, way, pa, f3, st_value);
+	    $display ("      cache.fa_write: va_cset_cword_in_cache %0h way %0d pa %0h width_code %0d st_value %0h",
+		      va_cset_cword_in_cache, way, pa, width_code, st_value);
 	    $display ("      from: ", fshow_cset_cword (ram_A_cset_cword));
 	    $display ("      to:   ", fshow_cset_cword (new_cset_cword));
 	 end
@@ -517,20 +541,20 @@ module mkCache #(parameter Bool      dcache_not_icache,
 
    rule rl_writeback_loop (rg_fsm_state == FSM_WRITEBACK_LOOP);
       // Accumulate a cword into rg_write_cline_buf
-      CSet_CWord cset_cword = ram_cset_cword.a.read;
-      Bit #(64)   cword     = cset_cword [rg_way_in_cset];
-      Vector #(CWords_per_CLine, Bit #(64)) v_cword = shiftInAtN (rg_write_cline_buf, cword);
-      rg_write_cline_buf <= v_cword;
+      CWord_Set cword_set = ram_cset_cword.a.read;
+      Cache_Entry   centry     = cword_set [rg_way_in_cset];
+      Vector #(CWords_per_CLine, Cache_Entry) v_centry = shiftInAtN (rg_write_cline_buf, centry);
+      rg_write_cline_buf <= v_centry;
 
       if (   ((verbosity >= 1) && (rg_cword_in_cline == 0))
 	  || (verbosity >= 2))
 	 begin
 	    $display ("%0d: %m.rl_writeback_loop", cur_cycle);
-	    $display ("    cset %0h way %0h cword %0h data %0h",
-		      rg_cset_in_cache, rg_way_in_cset, rg_cword_in_cline, cword);
+	    $display ("    cset %0h way %0h centry %0h data %0h",
+		      rg_cset_in_cache, rg_way_in_cset, rg_cword_in_cline, centry);
 	 end
 
-      // If last cset_cword in cline, return to continuation
+      // If last cword_set in cline, return to continuation
       Bool last = (rg_cword_in_cline == fromInteger (cwords_per_cline - 1));
       if (last) begin
 	 // Send write-request to L2/mem
@@ -539,17 +563,17 @@ module mkCache #(parameter Bool      dcache_not_icache,
 			       rg_cset_in_cache);
 	 f_L1_to_L2_rsps.enq (L1_to_L2_Rsp {addr:     zeroExtend (wb_cline_pa),
 					    to_state: rg_post_wb_meta_state,
-					    m_cline:  tagged Valid (pack (v_cword)) });
+					    m_cline:  Valid (v_centry) });
 	 rg_fsm_state <= rg_post_wb_fsm_state;
 	 if (verbosity >= 1) begin
 	    $display ("%0d: %m.rl_writeback_loop", cur_cycle);
 	    $display ("    Done; writeback cline @ %0h", wb_cline_pa, " -> ", fshow (rg_post_wb_fsm_state));
 	    for (Integer j = 0; j < cwords_per_cline; j = j + 1)
-	       $display ("        [%0d]  %016h", j, v_cword [j]);
+	       $display ("        [%0d]  %016h", j, v_centry [j]);
 	 end
       end
       else begin
-	 // Request next cset_cword from data RAM B to be accumulated, and increment index
+	 // Request next cword_set from data RAM B to be accumulated, and increment index
 	 CWord_in_CLine       cword_in_cline      = rg_cword_in_cline + 1;
 	 CSet_CWord_in_Cache  cset_cword_in_cache = { rg_cset_in_cache, cword_in_cline };
 	 ram_cset_cword.a.put (bram_cmd_read, cset_cword_in_cache, ?);
@@ -639,7 +663,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
       PA    cline_pa      = fn_align_Addr_to_CLine (rg_pa);
       Bool  for_write     = (   (rg_cache_op == CACHE_ST)
 `ifdef ISA_A
-			     || ((rg_cache_op == CACHE_AMO) && (rg_amo_funct7 [6:2] != f5_AMO_LR))
+			     || ((rg_cache_op == CACHE_AMO) && (rg_amo_funct5 != f5_AMO_LR))
 `endif
 			   );
       Meta_State to_state = (for_write ? META_EXCLUSIVE : META_SHARED);
@@ -695,7 +719,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
 
       // On iteration 0, cline comes from f_L2_to_L1_rsps and is registered in rg_read_cline_buf
       // On subsequent iterations, cline comes from rg_read_cline_buf
-      Vector #(CWords_per_CLine, Bit #(64)) v_cword = ?;
+      Vector #(CWords_per_CLine, Cache_Entry) v_centry = ?;
       if (rg_cword_in_cline == 0) begin
 	 let cline_rsp <- pop (f_L2_to_L1_rsps);
 
@@ -707,27 +731,27 @@ module mkCache #(parameter Bool      dcache_not_icache,
 	 if (verbosity >= 1)
 	    $display ("    -> ", fshow (cline_rsp.to_state));
 	 if (cline_rsp.m_cline matches tagged Valid .cline) begin
-	    v_cword = unpack (cline);
+	    v_centry = cline;
 	    if (verbosity >= 1) begin
 	       for (Integer j = 0; j < cwords_per_cline; j = j + 1)
-		  $display ("        [%0d]  %016h", j, v_cword [j]);
+		  $display ("        [%0d]  ", j, fshow (v_centry [j]));
 	    end
 	 end
 	 else
 	    update_data = False;
       end
       else
-	 v_cword = rg_read_cline_buf;
+	 v_centry = rg_read_cline_buf;
 
-      rg_read_cline_buf <= shiftInAtN (v_cword, ?);
+      rg_read_cline_buf <= shiftInAtN (v_centry, ?);
 
       if (update_data) begin
-	 // Next cword is at index 0 of cline viewed as vector of cwords
-	 let cword = v_cword [0];
+	 // Next centry is at index 0 of cline viewed as vector of cwords
+	 let centry = v_centry [0];
 
 	 // Update the CSet_CWord (BRAM port B)
-	 let new_cset_cword              = ram_cset_cword.a.read; 
-	 new_cset_cword [rg_way_in_cset] = cword;
+	 let new_cset_cword              = ram_cset_cword.a.read;
+	 new_cset_cword [rg_way_in_cset] = centry;
 	 let cset_cword_in_cache         = { va_cset_in_cache, rg_cword_in_cline };
 	 ram_cset_cword.b.put (bram_cmd_write, cset_cword_in_cache, new_cset_cword);
       end
@@ -1052,6 +1076,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
 	 $display ("%0d: %m.ma_request_va: %0h", cur_cycle, va);
    endmethod
 
+
    // This completes a new request with the phys addr
    method ActionValue #(Cache_Result)
           mav_request_pa (MMU_Cache_Req req, PA pa)
@@ -1066,9 +1091,9 @@ module mkCache #(parameter Bool      dcache_not_icache,
 
 	 Cache_Result result = ?;
 	 rg_cache_op <= req.op;
-	 rg_f3       <= req.f3;
+	 rg_width_code       <= req.width_code;
 `ifdef ISA_A
-	 rg_amo_funct7 <= req.amo_funct7;
+	 rg_amo_funct5 <= req.amo_funct5;
 `endif
 	 rg_pa <= pa;
 
@@ -1078,8 +1103,9 @@ module mkCache #(parameter Bool      dcache_not_icache,
 	 let valid_info = fv_ram_A_valid_info (pa);
 	 if (verbosity >= 1)
 	    $display ("    valid_info = ", fshow (valid_info));
-	 let data       = fv_from_byte_lanes (zeroExtend (req.va), req.f3 [1:0], valid_info.data);
-	 data = fv_extend (req.f3, data);
+	 let data = fv_from_byte_lanes (zeroExtend (req.va), req.width_code, tpl_2 (valid_info.data));
+	 data = fv_extend (req.width_code, req.is_unsigned, data);
+     let capTag = unpack (tpl_1 (valid_info.data));
 
 	 if (valid_info.num_valids > 1) begin
 	    // Assertion failure: # cannot match more than 1 item in a set
@@ -1096,7 +1122,7 @@ module mkCache #(parameter Bool      dcache_not_icache,
 	    if (verbosity >= 1)
 	       $display ("    LOAD-HIT: va %0h pa %0h data %0h", req.va, pa, data);
 	    result = Cache_Result {outcome:      CACHE_READ_HIT,
-				   final_ld_val: data,
+				   final_ld_val: tuple2 (capTag, data),
 				   final_st_val: ?};
 	 end
 
@@ -1104,9 +1130,9 @@ module mkCache #(parameter Bool      dcache_not_icache,
 	 else if (valid && (req.op == CACHE_ST) && (valid_info.valid_state > META_SHARED)) begin
 	    if (verbosity >= 1)
 	       $display ("    STORE-HIT: va %0h pa %0h data %0h", req.va, pa, req.st_value);
-	    fa_write (pa, req.f3, req.st_value);
+	    fa_write (pa, req.width_code, req.st_value);
 	    result = Cache_Result {outcome:      CACHE_WRITE_HIT,
-				   final_ld_val: 0,
+				   final_ld_val: tuple2 (False, 0),
 				   final_st_val: req.st_value};
 
 	    // Cancel LR/SC reservation if this store is for this addr
@@ -1122,9 +1148,9 @@ module mkCache #(parameter Bool      dcache_not_icache,
 	       $display ("    LR-HIT: va %0h pa %0h data %0h", req.va, pa, data);
 	    rg_lrsc_valid <= True;
 	    rg_lrsc_pa    <= pa;
-	    rg_lrsc_size  <= req.f3 [1:0];
+	    rg_lrsc_size  <= req.width_code;
 	    result = Cache_Result {outcome:      CACHE_READ_HIT,
-				   final_ld_val: data,
+				   final_ld_val: tuple2 (capTag, data),
 				   final_st_val: ?};
 	 end
 
@@ -1135,9 +1161,9 @@ module mkCache #(parameter Bool      dcache_not_icache,
 		  $display ("    SC-HIT and success: va %0h pa %0h data %0h",
 			    req.va, pa, req.st_value);
 	       rg_lrsc_valid <= False;
-	       fa_write (pa, req.f3, req.st_value);
+	       fa_write (pa, req.width_code, req.st_value);
 	       result = Cache_Result {outcome:      CACHE_WRITE_HIT,
-				      final_ld_val: 0,    // SC success
+				      final_ld_val: tuple2 (False, 0),    // SC success
 				      final_st_val: req.st_value};
 	    end
 	    else begin
@@ -1145,35 +1171,35 @@ module mkCache #(parameter Bool      dcache_not_icache,
 		  $display ("    SC-HIT and fail: va %0h pa %0h data %0h",
 			    req.va, pa, req.st_value);
 	       result = Cache_Result {outcome:      CACHE_READ_HIT,
-				      final_ld_val: 1,    // SC fail
-				      final_st_val: 0};
+				      final_ld_val: tuple2 (False, 1),    // SC fail
+				      final_st_val: tuple2 (False, 0)};
 	    end
 	 end
 
 	 // Hit for all AMO read-modify-writes (i.e., AMO other than LR and SC)
 	 else if (valid && (req.op == CACHE_AMO) && (valid_info.valid_state > META_SHARED)) begin
-	    Fmt fmt_op = fshow_f5_AMO_op (req.amo_funct7 [6:2]);
+	    Fmt fmt_op = fshow_f5_AMO_op (req.amo_funct5);
 	    if (verbosity >= 1) begin
 	       $display ("    AMO-HIT: va %0h pa %0h data %0h", req.va, pa, req.st_value);
-	       $display ("    f3 %3b AMO ", req.f3, fmt_op);
+	       $display ("    width_code %3b AMO ", req.width_code, fmt_op);
 	       $display ("    va %0h  pa %0h  st_value %0h", req.va, pa, req.st_value);
 	       $display ("    Cache cword %0h, load-result %0h",
 			 valid_info.data, valid_info.data);
 	    end
 
-	    let size_code  = req.f3 [1:0];
-	    let cache_data = fv_from_byte_lanes (zeroExtend (req.va), size_code, valid_info.data);
+	    let cache_data = fv_from_byte_lanes (zeroExtend (req.va), req.width_code, tpl_2 (valid_info.data));
 	    // Do the AMO op on the loaded value and the store value
 	    match {.new_ld_val,
-		   .new_st_val} = fv_amo_op (size_code,
-					     req.amo_funct7 [6:2],
-					     cache_data,
+		   .new_st_val} = fn_amo_op (req.width_code,
+					     req.amo_funct5,
+                         pa,
+					     tuple2 (capTag, cache_data),
 					     req.st_value);
 	    if (verbosity >= 1) begin
 	       $display ("    ", fmt_op, " (%0h, %0h) -> %0h",
 			 cache_data, req.st_value, new_st_val);
 	    end
-	    fa_write (pa, req.f3, new_st_val);
+	    fa_write (pa, req.width_code, new_st_val);
 	    result = Cache_Result {outcome:      CACHE_WRITE_HIT,
 				   final_ld_val: new_ld_val,
 				   final_st_val: new_st_val};

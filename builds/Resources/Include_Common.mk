@@ -37,8 +37,8 @@ all: compile  simulator
 # WT = Write-through; WB = write-back
 # L1 = L1 only; L1_L2 = L1 + coherent L2
 
-CACHES ?= WT_L1
-#CACHES ?= WB_L1_L2
+#CACHES ?= WT_L1
+CACHES ?= WB_L1_L2
 
 ifeq ($(CACHES),WB_L1)
   NEAR_MEM_VM_DIR=Near_Mem_VM_WB_L1

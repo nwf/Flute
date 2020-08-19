@@ -49,7 +49,8 @@ import Semi_FIFOF :: *;
 
 import MMU_Cache_Common :: *;    // For Single_Req, Single_Rsp types
 
-import AXI4_Types  :: *;
+import AXI4        :: *;
+import SourceSink  :: *;
 import Fabric_Defs :: *;
 
 // ================================================================
@@ -63,7 +64,9 @@ interface MMIO_AXI4_Adapter_IFC #(numeric type num_clients_t);
 
    // ----------------
    // AXI-side
-   interface AXI4_Master_IFC #(Wd_Id, Wd_Addr, Wd_Data, Wd_User) mem_master;
+   interface AXI4_Master #( Wd_MId, Wd_Addr, Wd_Data
+                          , Wd_AW_User, Wd_W_User, Wd_B_User
+                          , Wd_AR_User, Wd_R_User) mem_master;
 
    // ----------------
    // Write-error from memory
@@ -78,8 +81,8 @@ endinterface
 // Convert size code into AXI4_Size code (number of bytes in a beat).
 // It just so happens that our coding coincides with AXI4's coding.
 
-function AXI4_Size  fv_size_code_to_AXI4_Size (Bit #(2) size_code);
-   return { 1'b0, size_code };
+function AXI4_Size fv_width_code_to_AXI4_Size (Bit #(3) width_code);
+   return unpack (zeroExtend (width_code));
 endfunction
 
 // ----------------------------------------------------------------
@@ -114,8 +117,7 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
    Reg #(Bool) rg_wr_error <- mkReg (False);
 
    // AXI4 fabric request/response
-   AXI4_Master_Xactor_IFC #(Wd_Id, Wd_Addr, Wd_Data, Wd_User)
-      master_xactor <- mkAXI4_Master_Xactor;
+   let masterPortShim <- mkAXI4ShimFF;
 
    // ****************************************************************
    // BEHAVIOR: read requests
@@ -140,23 +142,23 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
       action
 	 let         req   <- pop (f_reqs_j);
 	 Fabric_Addr araddr = fv_Addr_to_Fabric_Addr (req.addr);
-	 AXI4_Size   arsize = fv_size_code_to_AXI4_Size (req.size_code);
+	 AXI4_Size   arsize = fv_width_code_to_AXI4_Size (req.width_code);
 
 	 // Note: AXI4 codes a burst length of 'n' as 'n-1'.
 	 // Only size D in 32-bit fabrics needs 2 beats.
 	 AXI4_Len  arlen = 0;    // 1 beat
-	 if ((valueOf (Wd_Data) == 32) && (req.size_code == 2'b11)) begin
-	    arsize = axsize_4;
+	 if ((valueOf (Wd_Data) == 32) && (req.width_code == 3'b011)) begin
+	    arsize = 4;
 	    arlen  = 1;    // 2 beats
 	 end
 
 	 if (verbosity >= 1) begin
 	    $display ("%0d: %m.rl_rd_req", cur_cycle);
 	    $display ("    AXI4_Rd_Addr {araddr %0h arlen %d ",
-		      araddr,  arlen, fshow_AXI4_Size (arsize), "}");
+		      araddr,  arlen, fshow (arsize), "}");
 	 end
 
-	 let mem_req_rd_addr = AXI4_Rd_Addr {arid:     fabric_default_id,
+	 let mem_req_rd_addr = AXI4_ARFlit {arid:     fabric_default_mid,
 					     araddr:   araddr,
 					     arlen:    arlen,
 					     arsize:   arsize,
@@ -166,8 +168,8 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 					     arprot:   fabric_default_prot,
 					     arqos:    fabric_default_qos,
 					     arregion: fabric_default_region,
-					     aruser:   fabric_default_user};
-	 master_xactor.i_rd_addr.enq (mem_req_rd_addr);
+					     aruser:   fabric_default_aruser};
+     masterPortShim.slave.ar.put (mem_req_rd_addr);
 
 	 f_rd_rsp_control.enq (tuple4 (fromInteger (j), arsize, req.addr [2:0], arlen));
 	 rg_rd_beat         <= 0;
@@ -187,15 +189,15 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 
    match {.rd_client_id,
 	  .rd_arsize,
-	  .rd_addr_lsbs, 
+	  .rd_addr_lsbs,
 	  .rd_arlen      } = f_rd_rsp_control.first;
 
    Reg #(Bit #(64)) rg_rd_data_buf <- mkRegU;    // accumulate data across beats
 
    rule rl_rd_data (rg_rd_beat <= rd_arlen);
       // Get read-data response from AXI4
-      let       rd_data <- pop_o (master_xactor.o_rd_data);
-      Bool      ok      = (rd_data.rresp == axi4_resp_okay);
+      let rd_data <- get (masterPortShim.slave.r);
+      Bool      ok      = (rd_data.rresp == OKAY);
 
       // Accumulate beats into word64 and rg_rd_data
       Bit #(64) word64 = rg_rd_data_buf;
@@ -218,7 +220,7 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 
 	 // Adjust alignment of B,H,W data
 	 // addr [1:0] is non-zero only for B, H, W (so, single-beat, so data is in [31:0])
-	 if (rd_arsize != axsize_8) begin
+	 if (rd_arsize != 8) begin
 	    Bit #(6) shamt_bits = ?;
 	    if (valueOf (Wd_Data) == 32)
 	       shamt_bits = { 1'b0, rd_addr_lsbs [1:0], 3'b000 };
@@ -231,7 +233,7 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 	    end
 	    word64 = (word64 >> shamt_bits);
 	 end
-	 let rsp = Single_Rsp {ok: ok, data: word64};
+	 let rsp = Single_Rsp {ok: ok, data: tuple2 (0, zeroExtend (word64))}; // XXX TODO FIXME
 	 v_f_rsps [rd_client_id].enq (rsp);
 
 	 // Reset beat counter for next transaction
@@ -263,22 +265,23 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 	 let req = f_reqs_j.first;    // Don't deq it until data beats sent
 
 	 // Data is in lsbs
-	 Bit #(64) word64 = req.data;
-	 Bit #(8)  strb   = case (req.size_code)
-			       2'b00: 8'h_01;
-			       2'b01: 8'h_03;
-			       2'b10: 8'h_0F;
-			       2'b11: 8'h_FF;
+	 Bit #(64) word64 = truncate (tpl_2 (req.data)); // XXX TODO FIXME
+	 Bit #(8)  strb   = case (req.width_code)
+			       3'b000: 8'h_01;
+			       3'b001: 8'h_03;
+			       3'b010: 8'h_0F;
+			       3'b011: 8'h_FF;
+                   default: 8'h_FF;
 			    endcase;
 
 	 Fabric_Addr awaddr = fv_Addr_to_Fabric_Addr (req.addr);
-	 AXI4_Size   awsize = fv_size_code_to_AXI4_Size (req.size_code);
+	 AXI4_Size   awsize = fv_width_code_to_AXI4_Size (req.width_code);
 	 AXI4_Len    awlen  = 0;    // 1 beat
 
 	 // Adjustments for AXI4 data bus widths of 32-bit and 64-bit
-	 if (awsize == axsize_8) begin
+	 if (awsize == 8) begin
 	    if (valueOf (Wd_Data) == 32) begin
-	       awsize = axsize_4;
+	       awsize = 4;
 	       awlen  = 1;     // 2 beats
 	    end
 	 end
@@ -304,7 +307,7 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 	 rg_wr_beat      <= 0;
 
 	 // AXI4 Write-Address channel
-	 let mem_req_wr_addr = AXI4_Wr_Addr {awid:     fabric_default_id,
+	 let mem_req_wr_addr = AXI4_AWFlit {awid:     fabric_default_mid,
 					     awaddr:   awaddr,
 					     awlen:    awlen,
 					     awsize:   awsize,
@@ -314,8 +317,8 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 					     awprot:   fabric_default_prot,
 					     awqos:    fabric_default_qos,
 					     awregion: fabric_default_region,
-					     awuser:   fabric_default_user};
-	 master_xactor.i_wr_addr.enq (mem_req_wr_addr);
+					     awuser:   fabric_default_awuser};
+     masterPortShim.slave.aw.put (mem_req_wr_addr);
 	 rg_wr_rsps_pending <= rg_wr_rsps_pending + 1;
 
 	 // Debugging
@@ -323,7 +326,7 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 	    $display ("%0d: %m.rl_wr_req", cur_cycle);
 	    $display ("    AXI4_Wr_Addr{awaddr %0h awlen %0d awlen %0d ",
 		      awaddr, awlen,
-		      fshow_AXI4_Size (awsize),
+		      fshow (awsize),
 		      " incr}");
 	 end
       endaction
@@ -349,11 +352,11 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
       // Send AXI write-data
       Bit #(Wd_Data)             wdata = truncate (rg_wr_data_buf);
       Bit #(TDiv #(Wd_Data, 8))  wstrb = truncate (rg_wr_strb_buf);
-      let wr_data = AXI4_Wr_Data {wdata:  wdata,
+      let wr_data = AXI4_WFlit {wdata:  wdata,
 				  wstrb:  wstrb,
 				  wlast:  last,
-				  wuser:  fabric_default_user};
-      master_xactor.i_wr_data.enq (wr_data);
+				  wuser:  fabric_default_wuser};
+      masterPortShim.slave.w.put (wr_data);
 
       // Prepare for next beat
       rg_wr_data_buf <= (rg_wr_data_buf >> valueOf (Wd_Data));
@@ -370,7 +373,7 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
    // Write responses: discard, but accumulate sticky error
 
    rule rl_wr_rsp;
-      let wr_resp <- pop_o (master_xactor.o_wr_resp);
+      let wr_resp <- get (masterPortShim.slave.b);
 
       Bool err = False;
       if (rg_wr_rsps_pending == 0) begin
@@ -382,7 +385,7 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
       end
       else begin
 	 rg_wr_rsps_pending <= rg_wr_rsps_pending - 1;
-	 if (wr_resp.bresp != axi4_resp_okay) begin
+	 if (wr_resp.bresp != OKAY) begin
 	    rg_wr_error <= True;
 	    if (verbosity >= 1) begin
 	       $display ("%0d: %m.rl_wr_rsp: ERROR", cur_cycle);
@@ -409,7 +412,7 @@ module mkMMIO_AXI4_Adapter #(parameter Bit #(3) verbosity)
 
    // ----------------
    // AXI-side
-   interface mem_master = master_xactor.axi_side;
+   interface mem_master = masterPortShim.master;
 
    // ----------------
    // Write-error from memory

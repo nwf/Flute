@@ -1188,7 +1188,7 @@ typedef struct {
 // ================================================================
 // CHERI ISA defs
 
-`include "ISA_Decls_CHERI.bsv"
+`include "ISA_Decls_CHERI.bsvi"
 
 // ================================================================
 // Hypervisor-Level ISA defs

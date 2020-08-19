@@ -131,6 +131,50 @@ typedef  TLog #(Bytes_per_Fabric_Data)  ZLSBs_Aligned_Fabric_Addr;
 Integer  zlsbs_aligned_fabric_addr = valueOf (ZLSBs_Aligned_Fabric_Addr);
 
 // ================================================================
+// This part of the interface is lifted out to surrounding modules.
+
+`ifdef MEM_512b
+
+typedef Wd_MId_2x3 Wd_Id_Mem;
+typedef 64  Wd_Addr_Mem;
+typedef 512 Wd_Data_Mem;
+typedef 0   Wd_AW_User_Mem;
+`ifndef ISA_CHERI
+typedef 0   Wd_W_User_Mem;
+`else
+typedef 4   Wd_W_User_Mem;
+`endif
+typedef 0   Wd_B_User_Mem;
+typedef 0   Wd_AR_User_Mem;
+`ifndef ISA_CHERI
+typedef 0   Wd_R_User_Mem;
+`else
+typedef 4   Wd_R_User_Mem;
+`endif
+
+`else
+
+typedef Wd_MId_2x3 Wd_Id_Mem;
+typedef Wd_Addr    Wd_Addr_Mem;
+typedef Wd_Data    Wd_Data_Mem;
+typedef Wd_AW_User Wd_AW_User_Mem;
+typedef Wd_W_User  Wd_W_User_Mem;
+typedef Wd_B_User  Wd_B_User_Mem;
+typedef Wd_AR_User Wd_AR_User_Mem;
+typedef Wd_R_User  Wd_R_User_Mem;
+
+`endif
+
+typedef AXI4_Master #(Wd_Id_Mem,
+			  Wd_Addr_Mem,
+			  Wd_Data_Mem,
+			  Wd_AW_User_Mem,
+			  Wd_W_User_Mem,
+			  Wd_B_User_Mem,
+			  Wd_AR_User_Mem,
+			  Wd_R_User_Mem)  Near_Mem_Fabric_IFC;
+
+// ================================================================
 // AXI4 defaults for this project
 Bit#(Wd_MId_2x3) fabric_2x3_default_mid = 0;
 Bit#(Wd_MId)     fabric_default_mid     = 0;

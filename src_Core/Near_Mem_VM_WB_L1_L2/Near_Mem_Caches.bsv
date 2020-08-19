@@ -110,17 +110,21 @@ function Meta_State fv_Msi_to_Meta_State (CCTypes::Msi s);
 	   endcase);
 endfunction
 
-function Maybe #(CCTypes::Line) fv_M_CLine_to_M_Line (Maybe #(CLine) m_cline);
+function Maybe #(CCTypes::Line) fv_M_CLine_to_M_Line (
+                   Maybe #(Vector #(CWords_per_CLine, Cache_Entry)) m_cline);
    return (case (m_cline) matches
 	      tagged Invalid: tagged Invalid;
-	      tagged Valid .x: tagged Valid (unpack (x));
+          tagged Valid .x: tagged Valid (Line { tag: unpack (pack (map (tpl_1, x))),
+                                                data: unpack (pack (map (tpl_2, x)))});
 	   endcase);
 endfunction
 
-function Maybe #(CLine) fv_M_Line_to_M_CLine (Maybe #(CCTypes::Line) m_line);
+function Maybe #(Vector #(CWords_per_CLine, Cache_Entry))
+        fv_M_Line_to_M_CLine (Maybe #(CCTypes::Line) m_line);
    return (case (m_line) matches
 	      tagged Invalid:  tagged Invalid;
-	      tagged Valid .x: tagged Valid (pack (x));
+	      tagged Valid .x: tagged Valid (zip ( unpack (pack (x.tag))
+                                             , unpack (pack (x.data))));
 	   endcase);
 endfunction
 
@@ -237,10 +241,11 @@ module mkNear_Mem (Near_Mem_IFC);
    LLCache llc <- mkLLCache;
 
    // Adapter for llc's 'coherent DMA interface'
-   AXI4_Slave_IFC #(Wd_Id_Dma,
-		    Wd_Addr_Dma,
-		    Wd_Data_Dma,
-		    Wd_User_Dma)  llc_dma_axi4_adapter <- mkLLC_DMA_AXI4_Adapter (llc.dma);
+//   AXI4_Slave_IFC #(Wd_Id_Dma,
+//		    Wd_Addr_Dma,
+//		    Wd_Data_Dma,
+//		    Wd_User_Dma)  llc_dma_axi4_adapter <- mkLLC_DMA_AXI4_Adapter (llc.dma);
+   let llc_dma_axi4_adapter <- mkLLC_DMA_AXI4_Adapter (llc.dma);
 
    // Adapter for back-side of LLC to AXI4
    LLC_AXI4_Adapter_IFC  llc_axi4_adapter <- mkLLC_AXi4_Adapter (llc.to_mem);
@@ -329,12 +334,13 @@ module mkNear_Mem (Near_Mem_IFC);
 			  WordXL     satp);    // { VM_Mode, ASID, PPN_for_page_table }
 	 i_mmu_cache.ma_req (addr, priv, sstatus_SUM, mstatus_MXR, satp);
       endmethod
+      method Action commit = i_mmu_cache.commit;
 
       // CPU side: IMem response
       method Bool     valid          = i_mmu_cache.valid;
       method Bool     is_i32_not_i16 = True;
       method WordXL   pc             = i_mmu_cache.addr;
-      method Instr    instr          = truncate (i_mmu_cache.word64);
+      method Instr    instr          = truncate (i_mmu_cache.inst);
       method Bool     exc            = i_mmu_cache.exc;
       method Exc_Code exc_code       = i_mmu_cache.exc_code;
       method WordXL   tval           = i_mmu_cache.addr;
@@ -345,27 +351,29 @@ module mkNear_Mem (Near_Mem_IFC);
       // CPU side: DMem request
       method Action  req (CacheOp op,
 			  Bit #(3) f3,
+              Bool is_unsigned,
 `ifdef ISA_A
-			  Bit #(7) amo_funct7,
+		      Bit #(5) amo_funct5,
 `endif
-			  WordXL addr,
-			  Bit #(64) store_value,
+			  Addr addr,
+              Tuple2#(Bool, Bit #(128)) store_value,
 			  // The following  args for VM
 			  Priv_Mode  priv,
 			  Bit #(1)   sstatus_SUM,
 			  Bit #(1)   mstatus_MXR,
 			  WordXL     satp);    // { VM_Mode, ASID, PPN_for_page_table }
-	 d_mmu_cache.ma_req (op, f3,
+	 d_mmu_cache.ma_req (op, f3, is_unsigned,
 `ifdef ISA_A
-			     amo_funct7,
+			     amo_funct5,
 `endif
 			     addr, store_value, priv, sstatus_SUM, mstatus_MXR, satp);
       endmethod
+      method Action commit = d_mmu_cache.commit;
 
       // CPU side: DMem response
       method Bool       valid      = d_mmu_cache.valid;
-      method Bit #(64)  word64     = d_mmu_cache.word64;
-      method Bit #(64)  st_amo_val = d_mmu_cache.st_amo_val;
+      method word128 = d_mmu_cache.cword;
+      method st_amo_val = d_mmu_cache.st_amo_val;
       method Bool       exc        = d_mmu_cache.exc;
       method Exc_Code   exc_code   = d_mmu_cache.exc_code;
    endinterface

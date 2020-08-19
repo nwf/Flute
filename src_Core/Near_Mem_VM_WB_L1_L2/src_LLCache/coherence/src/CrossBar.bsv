@@ -1,5 +1,18 @@
 
 // Copyright (c) 2017 Massachusetts Institute of Technology
+//
+//-
+// RVFI_DII + CHERI modifications:
+//     Copyright (c) 2020 Jonathan Woodruff
+//     All rights reserved.
+//
+//     This software was developed by SRI International and the University of
+//     Cambridge Computer Laboratory (Department of Computer Science and
+//     Technology) under DARPA contract HR0011-18-C-0016 ("ECATS"), as part of the
+//     DARPA SSITH research programme.
+//
+//     This work was supported by NCSC programme grant 4212611/RFA 15971 ("SafeBet").
+//-
 // 
 // Permission is hereby granted, free of charge, to any person
 // obtaining a copy of this software and associated documentation
@@ -118,7 +131,7 @@ module mkXBar#(
         for(Integer i = 0; i < valueOf(srcNum); i = i+1) begin
             if(isDeqSrc(fromInteger(i))) begin
                 propDstIdx[i][1] <= Invalid;
-	       if (verbose)
+               if (verbose)
                 $display("%t XBar %m: deq src %d", $time, i);
                 doAssert(isValid(propDstIdx[i][1]), "src must be proposing");
             end
@@ -133,7 +146,7 @@ module mkXBar#(
         rule doEnq(enqDst[i][1] matches tagged Valid .d);
             dstIfc[i].put(d);
             enqDst[i][1] <= Invalid; // reset enq command
-	   if (verbose)
+           if (verbose)
             $display("%t XBAR %m: enq dst %d ; ", $time, i, fshow(d));
         endrule
     end

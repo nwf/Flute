@@ -31,13 +31,17 @@ deriving (Bits, Eq, FShow);
 // ================================================================
 // Requests from CPU to MMU_Cache
 
-typedef struct {CacheOp    op;
-		Bit #(3)   f3;
-		WordXL     va;
-		Bit #(64)  st_value;
+typedef TDiv#(Bits_per_CWord, CLEN) Cache_Cap_Tag_Width;
+typedef Tuple2#(Bit#(Cache_Cap_Tag_Width), CWord) Cache_Entry;
 
+typedef struct {CacheOp    op;
+		Bit #(3)   width_code;
+        Bool is_unsigned;
+        Bool is_cap;
+		WordXL     va;
+		Tuple2 #(Bool, CWord) st_value;
 `ifdef ISA_A
-		Bit #(7)   amo_funct7;
+		Bit #(5)   amo_funct5;
 `endif
 `ifdef ISA_PRIV_S
 		// The following are needed/used for VM translation only
@@ -50,12 +54,12 @@ typedef struct {CacheOp    op;
 deriving (Bits, FShow);
 
 function Fmt fshow_MMU_Cache_Req (MMU_Cache_Req req);
-   Fmt fmt = $format ("MMU_Cache_Req{", fshow (req.op), " f3 %3b", req.f3);
+   Fmt fmt = $format ("MMU_Cache_Req{", fshow (req.op), " width_code %3b", req.width_code);
 
 `ifdef ISA_A
    if (req.op == CACHE_AMO) begin
-      fmt = fmt + $format (" ", fshow_f5_AMO_op (req.amo_funct7 [6:2]));
-      fmt = fmt + $format (" aqrl %2b", req.amo_funct7 [1:0]);
+      fmt = fmt + $format (" ", fshow_f5_AMO_op (req.amo_funct5));
+      //fmt = fmt + $format (" aqrl %2b", req.amo_funct7 [1:0]);
    end
 `endif
    fmt = fmt + $format (" va %0h", req.va);
@@ -88,6 +92,7 @@ deriving (Bits, Eq, FShow);
 
 typedef struct {
    VM_Xlate_Outcome  outcome;
+   Bool              allow_cap;     // whether we will be allowed to load a cap
    PA                pa;            // phys addr, if VM_XLATE_OK
    Exc_Code          exc_code;      // if VM_XLATE_EXC
 
@@ -146,11 +151,12 @@ endfunction
 // ================================================================
 // Check if addr is aligned
 
-function Bool fn_is_aligned (Bit #(2) size_code, Bit #(n) addr);
-   return (    (size_code == 2'b00)                                // B
-	   || ((size_code == 2'b01) && (addr [0] == 1'b0))         // H
-	   || ((size_code == 2'b10) && (addr [1:0] == 2'b00))      // W
-	   || ((size_code == 2'b11) && (addr [2:0] == 3'b000))     // D
+function Bool fn_is_aligned (Bit #(3) width_code, Bit #(n) addr);
+   return (    (width_code == 3'b000)                                // B
+	   || ((width_code == 3'b001) && (addr [0] == 1'b0))         // H
+	   || ((width_code == 3'b010) && (addr [1:0] == 2'b00))      // W
+	   || ((width_code == 3'b011) && (addr [2:0] == 3'b000))     // D
+	   || ((width_code == 3'b100) && (addr [3:0] == 4'b0000))    // Q
 	   );
 endfunction
 
@@ -168,7 +174,7 @@ endfunction
 
 function Bool fv_is_AMO_LR (MMU_Cache_Req req);
 `ifdef ISA_A
-   return ((req.op == CACHE_AMO) && (req.amo_funct7 [6:2] == f5_AMO_LR));
+   return ((req.op == CACHE_AMO) && (req.amo_funct5 == f5_AMO_LR));
 `else
    return False;
 `endif
@@ -176,7 +182,7 @@ endfunction
 
 function Bool fv_is_AMO_SC (MMU_Cache_Req req);
 `ifdef ISA_A
-   return ((req.op == CACHE_AMO) && (req.amo_funct7 [6:2] == f5_AMO_SC));
+   return ((req.op == CACHE_AMO) && (req.amo_funct5 == f5_AMO_SC));
 `else
    return False;
 `endif
@@ -185,8 +191,8 @@ endfunction
 function Bool fv_is_AMO_RMW (MMU_Cache_Req req);
 `ifdef ISA_A
    return ((req.op == CACHE_AMO)
-	   && (req.amo_funct7 [6:2] != f5_AMO_LR)
-	   && (req.amo_funct7 [6:2] != f5_AMO_SC));
+	   && (req.amo_funct5 != f5_AMO_LR)
+	   && (req.amo_funct5 != f5_AMO_SC));
 `else
    return False;
 `endif
@@ -251,7 +257,7 @@ endfunction
 typedef struct {
    Bit #(64)       addr;
    Meta_State      to_state;   // Upgraded state
-   Maybe #(CLine)  m_cline;    // possible write-back data
+   Maybe #(Vector #(CWords_per_CLine, Cache_Entry)) m_cline;    // possible write-back data
    // id                       // Future (when L1 becomes non-blocking, out-of-order
 
    // Bool       ok;       // TODO DELETE
@@ -262,9 +268,8 @@ deriving (Bits, FShow);
 function Fmt fshow_L2_to_L1_Rsp (L2_to_L1_Rsp rsp);
    Fmt fmt = $format ("L2_to_L1_Rsp %0h -> ", rsp.addr, fshow (rsp.to_state));
    if (rsp.m_cline matches tagged Valid .cline) begin
-      Vector #(CWords_per_CLine, Bit #(64)) v_cword = unpack (cline);
       for (Integer j = 0; j < cwords_per_cline; j = j + 1)
-	 fmt = fmt + $format ("\n        [%0d]  %016h", j, v_cword [j]);
+	 fmt = fmt + $format ("\n        [%0d]  ", j, fshow (cline [j]));
    end
    else
       fmt = fmt + $format (" <no line>");
@@ -297,16 +302,15 @@ endfunction
 typedef struct {
    Bit #(64)       addr;
    Meta_State      to_state;    // Downgrade result
-   Maybe #(CLine)  m_cline;
+   Maybe #(Vector #(CWords_per_CLine, Cache_Entry)) m_cline;
    } L1_to_L2_Rsp
 deriving (Bits, FShow);
 
 function Fmt fshow_L1_to_L2_Rsp (L1_to_L2_Rsp rsp);
    Fmt fmt = $format ("L1_to_L2_Rsp %0h -> ", rsp.addr, fshow (rsp.to_state));
    if (rsp.m_cline matches tagged Valid .cline) begin
-      Vector #(CWords_per_CLine, Bit #(64)) v_cword = unpack (cline);
       for (Integer j = 0; j < cwords_per_cline; j = j + 1)
-	 fmt = fmt + $format ("\n        [%0d]  %016h", j, v_cword [j]);
+	 fmt = fmt + $format ("\n        [%0d]  ", j, fshow (cline [j]));
    end
    else
       fmt = fmt + $format (" <no line>");
@@ -319,103 +323,232 @@ endfunction
 
 // Single requests are from MMIO for 1, 2, 4 or 8 bytes.
 typedef struct {
-   Bool       is_read;
-   Bit #(64)  addr;
-   Bit #(2)   size_code;    // 2'b00=1 (B), 01=2 (H), 10=4 (W), 11=8 (D) bytes
-   Bit #(64)  data;         // For requests where is_read is False (i.e., write request)
+   Bool        is_read;
+   Bit #(64)   addr;
+   Bit #(3)    width_code;   // 2'b00=1 (B), 01=2 (H), 10=4 (W), 11=8 (D) bytes
+   Cache_Entry data;         // For requests where is_read is False (i.e., write request)
    } Single_Req
 deriving (Bits, FShow);
 
 // Response (for a Single_Req write-request, there's no response, i.e., 'fire-and-forget')
 
 typedef struct {
-   Bool       ok;
-   Bit #(64)  data;         // For requests where is_read is True (i.e., read request)
+   Bool         ok;
+   Cache_Entry data;         // For requests where is_read is True (i.e., read request)
    } Single_Rsp
 deriving (Bits, FShow);
 
 // ================================================================
 // Functions to/from lsb-justified data to fabric-lane-aligned data
 
-function Bit #(64) fv_size_code_to_mask (Bit #(2) size_code);
-   Bit #(64) mask = case (size_code)
-		       2'b00: 'h_0000_0000_0000_00FF;
-		       2'b01: 'h_0000_0000_0000_FFFF;
-		       2'b10: 'h_0000_0000_FFFF_FFFF;
-		       2'b11: 'h_FFFF_FFFF_FFFF_FFFF;
-		    endcase;
-   return mask;
+function Bit #(n) fv_size_code_to_mask (Bit #(3) width_code) =
+   ~(~0 << (1 << (width_code + 3)));
+
+//function Bit #(128) fv_size_code_to_mask (Bit #(3) width_code);
+//   Bit #(128) mask = case (width_code)
+//                        3'b000: 'h_0000_0000_0000_0000_0000_0000_0000_00FF;
+//                        3'b001: 'h_0000_0000_0000_0000_0000_0000_0000_FFFF;
+//                        3'b010: 'h_0000_0000_0000_0000_0000_0000_FFFF_FFFF;
+//                        3'b011: 'h_0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+//                        3'b100: 'h_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF;
+//                     endcase;
+//   return mask;
+//endfunction
+
+
+function Bit #(n) fv_to_byte_lanes (Bit #(64) addr, Bit #(3) width_code, Bit #(n) data);
+   Bit #(n) data1 = (data & fv_size_code_to_mask (width_code));
+
+   Bit #(7)  shamt = { addr [3:0], 3'b0 };
+   Bit #(n) data2 = (data1 << shamt);
+   return data2;
 endfunction
 
-function Bit #(64) fv_from_byte_lanes (Bit #(64)  addr,
-				       Bit #(2)   size_code,
-				       Bit #(64)  data);
-   Bit #(6)  shamt = { addr [2:0], 3'b0 };
-   Bit #(64) data1 = (data >> shamt);
+function Bit #(n) fv_from_byte_lanes (Bit #(64)  addr,
+				       Bit #(3)  width_code,
+				       Bit #(n)  data);
+   Bit #(7)  shamt = { addr [3:0], 3'b0 };
+   Bit #(n) data1 = (data >> shamt);
 
-   return (data1 & fv_size_code_to_mask (size_code));
+   return (data1 & fv_size_code_to_mask (width_code));
 endfunction
 
-function Bit #(64) fv_extend (Bit #(3) f3, Bit #(64) data);
-   Bit #(64) mask     = fv_size_code_to_mask (f3 [1:0]);
-   Bit #(1)  sign_bit = case (f3 [1:0])
-			   2'b00: data  [7];
-			   2'b01: data [15];
-			   2'b10: data [31];
-			   2'b11: data [63];
-			endcase;
-   Bit #(64) result;
-   if ((f3 [2] == 1'b0) && (sign_bit == 1'b1))
-      result = data | (~ mask);    // sign extend
-   else
-      result = data & mask;        // zero extend
+function Bit #(n) fv_extend (Bit #(3) width_code, Bool is_unsigned, Bit #(n) data);
+   Bit #(n) mask     = fv_size_code_to_mask (width_code);
+   let sign_bit = data [(1 << (width_code + 3))-1];
+   return (!is_unsigned && (sign_bit == 1'b1)) ? data | (~ mask) // sign extend
+                                               : data & mask;    // zero extend
+
+endfunction
+
+// ================================================================
+// Extract bytes from raw word read from near-mem.
+// The bytes of interest are offset according to LSBs of addr.
+// Arguments:
+//  - a RISC-V LD/ST f3 value (encoding LB, LH, LW, LD, LBU, LHU, LWU)
+//  - a byte-address
+//  - a load-word (loaded from cache/mem)
+// result:
+//  - word with correct byte(s) shifted into LSBs and properly extended
+function Tuple2#(Bool, Bit #(128)) fn_extract_and_extend_bytes (Bit #(3) f3, Bool is_unsigned, WordXL byte_addr, Cache_Entry word128_tagged);
+   Bit #(64)  result_lo  = 0;
+   Bit #(64)  result_hi  = 0;
+   Bit #(4)  addr_lsbs = byte_addr [3:0];
+
+   Bool tag = False;
+   Bit #(128) word128 = tpl_2(word128_tagged);
+
+   let u_s_extend = is_unsigned ? zeroExtend : signExtend;
+
+   case (f3)
+      0: case (addr_lsbs)
+		'h0: result_lo = u_s_extend (word128 [ 7: 0]);
+		'h1: result_lo = u_s_extend (word128 [15: 8]);
+		'h2: result_lo = u_s_extend (word128 [23:16]);
+		'h3: result_lo = u_s_extend (word128 [31:24]);
+		'h4: result_lo = u_s_extend (word128 [39:32]);
+		'h5: result_lo = u_s_extend (word128 [47:40]);
+		'h6: result_lo = u_s_extend (word128 [55:48]);
+		'h7: result_lo = u_s_extend (word128 [63:56]);
+		'h8: result_lo = u_s_extend (word128 [71:64]);
+		'h9: result_lo = u_s_extend (word128 [79:72]);
+		'ha: result_lo = u_s_extend (word128 [87:80]);
+		'hb: result_lo = u_s_extend (word128 [95:88]);
+		'hc: result_lo = u_s_extend (word128 [103:96]);
+		'hd: result_lo = u_s_extend (word128 [111:104]);
+		'he: result_lo = u_s_extend (word128 [119:112]);
+		'hf: result_lo = u_s_extend (word128 [127:120]);
+	     endcase
+
+      1: case (addr_lsbs)
+		'h0: result_lo = u_s_extend (word128 [15: 0]);
+		'h2: result_lo = u_s_extend (word128 [31:16]);
+		'h4: result_lo = u_s_extend (word128 [47:32]);
+		'h6: result_lo = u_s_extend (word128 [63:48]);
+		'h8: result_lo = u_s_extend (word128 [79:64]);
+		'ha: result_lo = u_s_extend (word128 [95:80]);
+		'hc: result_lo = u_s_extend (word128 [111:96]);
+		'he: result_lo = u_s_extend (word128 [127:112]);
+	     endcase
+
+      2: case (addr_lsbs)
+		'h0: result_lo = u_s_extend (word128 [31: 0]);
+		'h4: result_lo = u_s_extend (word128 [63:32]);
+		'h8: result_lo = u_s_extend (word128 [95:64]);
+		'hc: result_lo = u_s_extend (word128 [127:96]);
+	     endcase
+
+      3: case (addr_lsbs)
+		'h0: begin
+           result_lo = u_s_extend (word128 [63:0]);
+`ifdef ISA_CHERI
+           if (valueOf(CLEN) == 64) tag = tpl_1(word128_tagged)[0] == 1'b1;
+`endif
+         end
+		'h8: begin
+           result_lo = u_s_extend (word128 [127:64]);
+`ifdef ISA_CHERI
+           if (valueOf(CLEN) == 64) tag = tpl_1(word128_tagged)[1] == 1'b1;
+`endif
+         end
+	     endcase
+
+      4: begin
+            result_lo = word128[63:0];
+            result_hi = word128[127:64];
+`ifdef ISA_CHERI
+            tag = tpl_1(word128_tagged)[0] == 1'b1;
+`endif
+         end
+   endcase
+   return tuple2(tag, {result_hi, result_lo});
+endfunction
+
+// ================================================================
+// Extract bytes from word read from fabric.
+// The bytes of interest are already in the LSBs of 'word',
+// they just have to be suitably extended.
+// Arguments:
+//  - a RISC-V LD/ST f3 value (encoding LB, LH, LW, LD, LBU, LHU, LWU)
+//  - a byte-address
+//  - a load-word (loaded from fabric)
+// result:
+//  - word with correct byte(s), properly extended.
+
+function Bit #(64) fn_extend_bytes (Bit #(3) f3, Bit #(64) word64);
+   Bit #(64) result = 0;
+   case (f3)
+      f3_LB:  result = signExtend (word64 [ 7: 0]);
+      f3_LBU: result = zeroExtend (word64 [ 7: 0]);
+
+      f3_LH:  result = signExtend (word64 [15: 0]);
+      f3_LHU: result = zeroExtend (word64 [15: 0]);
+
+      f3_LW:  result = signExtend (word64 [31: 0]);
+      f3_LWU: result = zeroExtend (word64 [31: 0]);
+
+      f3_LD:  result = word64;
+   endcase
 
    return result;
 endfunction
 
 // ================================================================
 // ALU for AMO ops.
-// Args: ld_val (64b from mem) and st_val (64b from CPU reg Rs2)
-// Result: (final_ld_val, final_st_val)
-//
-// All args and results are in LSBs (i.e., not lane-aligned).
-// final_ld_val includes sign-extension (if necessary).
-// final_st_val is output of the binary AMO op
+// Returns the value to be stored back to mem.
 
-function Tuple2 #(Bit #(64),
-		  Bit #(64)) fv_amo_op (Bit #(2)   size_code, // 2'b10=W, 11=D
+`ifdef ISA_A
+function Tuple2 #(Tuple2#(Bool, Bit #(128)),
+		  Tuple2 #(Bool, Bit#(128))) fn_amo_op (
+		                        Bit #(3)   funct3,    // encodes data size (.W or .D)
 					Bit #(5)   funct5,    // encodes the AMO op
-					Bit #(64)  ld_val,    // 64b value loaded from mem
-					Bit #(64)  st_val);   // 64b value from CPU reg Rs2
-   Bit #(64) w1     = ld_val;
-   Bit #(64) w2     = st_val;
+					WordXL     addr,      // lsbs indicate which 32b W in 64b D (.W)
+					Cache_Entry ld_val,   // value loaded from mem
+					Tuple2#(Bool, Bit #(128)) st_val);   // Value from CPU reg Rs2
+   let extracted_q1 = fn_extract_and_extend_bytes(funct3, False, addr, ld_val);
+   Bit #(128) q1    = tpl_2(extracted_q1);
+   Bit #(128) q2    = tpl_2(st_val);
+   Bit #(64) w1     = truncate(q1);
+   Bit #(64) w2     = truncate(q2);
    Int #(64) i1     = unpack (w1);    // Signed, for signed ops
    Int #(64) i2     = unpack (w2);    // Signed, for signed ops
-   if (size_code == 2'b10) begin
+   if (funct3 == f3_AMO_W) begin
       w1 = zeroExtend (w1 [31:0]);
       w2 = zeroExtend (w2 [31:0]);
       i1 = unpack (signExtend (w1 [31:0]));
       i2 = unpack (signExtend (w2 [31:0]));
    end
-   Bit #(64) final_st_val = ?;
-   case (funct5)
-      f5_AMO_SWAP: final_st_val = w2;
-      f5_AMO_ADD:  final_st_val = pack (i1 + i2);
-      f5_AMO_XOR:  final_st_val = w1 ^ w2;
-      f5_AMO_AND:  final_st_val = w1 & w2;
-      f5_AMO_OR:   final_st_val = w1 | w2;
-      f5_AMO_MINU: final_st_val = ((w1 < w2) ? w1 : w2);
-      f5_AMO_MAXU: final_st_val = ((w1 > w2) ? w1 : w2);
-      f5_AMO_MIN:  final_st_val = ((i1 < i2) ? w1 : w2);
-      f5_AMO_MAX:  final_st_val = ((i1 > i2) ? w1 : w2);
-   endcase
+   // new_st_val is new value to be stored back to mem (w1 op w2)
+   Bit#(128) new_st_val_128;
+   Bool new_st_tag = False;
+   Bool old_ld_tag = False;
+   if (funct3 == f3_AMO_CAP) begin
+      new_st_val_128 = q2;
+      new_st_tag = tpl_1(st_val);
+      old_ld_tag = tpl_1 (extracted_q1);
+   end else begin
+     Bit #(64) new_st_val_64 = ?;
+     case (funct5)
+        f5_AMO_SWAP: new_st_val_64 = w2;
+        f5_AMO_ADD:  new_st_val_64 = pack (i1 + i2);
+        f5_AMO_XOR:  new_st_val_64 = w1 ^ w2;
+        f5_AMO_AND:  new_st_val_64 = w1 & w2;
+        f5_AMO_OR:   new_st_val_64 = w1 | w2;
+        f5_AMO_MINU: new_st_val_64 = ((w1 < w2) ? w1 : w2);
+        f5_AMO_MAXU: new_st_val_64 = ((w1 > w2) ? w1 : w2);
+        f5_AMO_MIN:  new_st_val_64 = ((i1 < i2) ? w1 : w2);
+        f5_AMO_MAX:  new_st_val_64 = ((i1 > i2) ? w1 : w2);
+     endcase
 
-   if (size_code == 2'b10)
-      final_st_val = zeroExtend (final_st_val [31:0]);
+     if (funct3 == f3_AMO_W)
+       new_st_val_64 = zeroExtend (new_st_val_64 [31:0]);
 
-   return tuple2 (truncate (pack (i1)), final_st_val);
-endfunction: fv_amo_op
+     new_st_val_128 = zeroExtend(new_st_val_64);
+   end
 
-// ================================================================
+   return tuple2 (tuple2(old_ld_tag, q1),
+                  tuple2(new_st_tag, zeroExtend(new_st_val_128)));
+endfunction: fn_amo_op
+`endif
 
 endpackage

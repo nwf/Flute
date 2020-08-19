@@ -1,6 +1,19 @@
-
 // Copyright (c) 2017 Massachusetts Institute of Technology
-// 
+//
+//-
+// RVFI_DII + CHERI modifications:
+//     Copyright (c) 2020 Alexandre Joannou
+//     Copyright (c) 2020 Jonathan Woodruff
+//     All rights reserved.
+//
+//     This software was developed by SRI International and the University of
+//     Cambridge Computer Laboratory (Department of Computer Science and
+//     Technology) under DARPA contract HR0011-18-C-0016 ("ECATS"), as part of the
+//     DARPA SSITH research programme.
+//
+//     This work was supported by NCSC programme grant 4212611/RFA 15971 ("SafeBet").
+//-
+//
 // Permission is hereby granted, free of charge, to any person
 // obtaining a copy of this software and associated documentation
 // files (the "Software"), to deal in the Software without
@@ -8,10 +21,10 @@
 // modify, merge, publish, distribute, sublicense, and/or sell copies
 // of the Software, and to permit persons to whom the Software is
 // furnished to do so, subject to the following conditions:
-// 
+//
 // The above copyright notice and this permission notice shall be
 // included in all copies or substantial portions of the Software.
-// 
+//
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
 // EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
 // MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
@@ -47,7 +60,7 @@ export mkLLBank;
 // this also ensures that cache pipeline is never blocked
 // so we do not need to buffer mem resp that needs to refill cache
 
-// XXX we need to maintain the invariant that 
+// XXX we need to maintain the invariant that
 // at most 1 pRq sent to a child for an addr
 // and we have to wait for resp before sending anthoer one
 
@@ -220,7 +233,7 @@ module mkLLBank#(
     Count#(Data) upRespDataCnt <- mkCount(0);
     Count#(Data) dmaLdReqCnt <- mkCount(0);
     Count#(Data) dmaStReqCnt <- mkCount(0);
-    
+
     LatencyTimer#(cRqNum, 10) latTimer <- mkLatencyTimer; // max 1K cycle latency
 
     function Action incrMissCnt(cRqIndexT idx, Bool isDma);
@@ -303,8 +316,8 @@ module mkLLBank#(
             mshrIdx: n
         }));
        if (verbose)
-        $display("%t LL %m cRqTransfer_retry: ", $time, 
-            fshow(n), " ; ", 
+        $display("%t LL %m cRqTransfer_retry: ", $time,
+            fshow(n), " ; ",
             fshow(req)
         );
     endrule
@@ -355,15 +368,15 @@ module mkLLBank#(
         cRqIndexT n <- cRqMshr.transfer.getEmptyEntryInit(cRq, Invalid);
         // send to pipeline
         pipeline.send(CRq (LLPipeCRqIn {
-            addr: cRq.addr, 
+            addr: cRq.addr,
             mshrIdx: n
         }));
         // change round robin
         flipPriorNewCRqSrc;
        if (verbose)
-        $display("%t LL %m cRqTransfer_new_child: ", $time, 
+        $display("%t LL %m cRqTransfer_new_child: ", $time,
             fshow(n), " ; ",
-            fshow(r), " ; ", 
+            fshow(r), " ; ",
             fshow(cRq)
         );
     endrule
@@ -393,7 +406,7 @@ module mkLLBank#(
     rule cRqTransfer_new_dma(!cRqRetryIndexQ.notEmpty && newCRqSrc == Valid (Dma));
         rqFromDmaQ.deq;
         dmaRqT r = rqFromDmaQ.first;
-        Bool write = r.byteEn != replicate(False);
+        Bool write = r.byteEn != replicate(replicate(False));
         cRqT cRq = LLRq {
             addr: r.addr,
             fromState: I,
@@ -407,15 +420,15 @@ module mkLLBank#(
         cRqIndexT n <- cRqMshr.transfer.getEmptyEntryInit(cRq, write ? Valid (r.data) : Invalid);
         // send to pipeline
         pipeline.send(CRq (LLPipeCRqIn {
-            addr: cRq.addr, 
+            addr: cRq.addr,
             mshrIdx: n
         }));
         // change round robin
         flipPriorNewCRqSrc;
        if (verbose)
-        $display("%t LL %m cRqTransfer_new_dma: ", $time, 
+        $display("%t LL %m cRqTransfer_new_dma: ", $time,
             fshow(n), " ; ",
-            fshow(r), " ; ", 
+            fshow(r), " ; ",
             fshow(cRq)
         );
 `ifdef PERF_COUNT
@@ -468,7 +481,7 @@ module mkLLBank#(
         end
 `endif
     endrule
-    
+
     // mem resp for child req, will refill cache, send it to pipeline
     (* descending_urgency = "mRsTransfer, cRsTransfer, cRqTransfer_retry, cRqTransfer_new_child, cRqTransfer_new_dma" *)
 `ifdef PERF_COUNT
@@ -534,7 +547,7 @@ module mkLLBank#(
         cRqSlotT cSlot = cRqMshr.sendToM.getSlot(n);
         Maybe#(Line) data = cRqMshr.sendToM.getData(n);
        if (verbose)
-        $display("%t LL %m sendToM: ", $time, 
+        $display("%t LL %m sendToM: ", $time,
             fshow(toMInfoQ.first), " ; ",
             fshow(cRq), " ; ",
             fshow(cSlot), " ; ",
@@ -555,7 +568,7 @@ module mkLLBank#(
             });
             toMQ.enq(msg);
             toMInfoQ.deq; // deq info
-	   if (verbose)
+           if (verbose)
             $display("%t LL %m sendToM: load only: ", $time, fshow(msg));
             doAssert(!isValid(data), "cannot have data");
             doAssert(!doLdAfterReplace, "doLdAfterReplace should be false");
@@ -580,7 +593,7 @@ module mkLLBank#(
             toMInfoQ.deq; // deq info
             // dma write can be resp (i.e. mshr entry can be released)
             rsStToDmaIndexQ_sendToM.enq(n);
-	   if (verbose)
+           if (verbose)
             $display("%t LL %m sendToM: dma write: ", $time, fshow(msg));
             doAssert(isRqFromDma(cRq.id), "must be dma write");
             doAssert(isValid(data), "dma write must have data");
@@ -604,7 +617,7 @@ module mkLLBank#(
                 // whole thing is done, reset bit and deq info
                 toMInfoQ.deq;
                 doLdAfterReplace <= False;
-	       if (verbose)
+               if (verbose)
                 $display("%t LL %m sendToM: rep then ld: ld: ", $time, fshow(msg));
 `ifdef PERF_COUNT
                 // performance counter: start miss timer
@@ -614,13 +627,13 @@ module mkLLBank#(
             else begin // do write back part
                 toMemT msg = Wb (WbMemRs {
                     addr: {cSlot.repTag, truncate(cRq.addr)},
-                    byteEn: replicate(True),
+                    byteEn: replicate(replicate(True)),
                     data: validValue(data)
                 });
                 toMQ.enq(msg);
                 // don't deq info, do ld next time
                 doLdAfterReplace <= True;
-	       if (verbose)
+               if (verbose)
                 $display("%t LL %m sendToM: rep then ld: rep: ", $time, fshow(msg));
             end
             doAssert(isRqFromC(cRq.id), "must be child req");
@@ -646,7 +659,7 @@ module mkLLBank#(
         doAssert(isValid(data), "dma read req always has valid data");
         // send DMA resp
         doAssert(isRqFromDma(cRq.id), "cRq should be DMA req");
-        doAssert(cRq.byteEn == replicate(False) && cRq.toState == S,
+        doAssert(cRq.byteEn == replicate(replicate(False)) && cRq.toState == S,
             "cRq should be DMA read"
         );
         dmaRqIdT dmaId = getIdFromDma(cRq.id);
@@ -669,7 +682,7 @@ module mkLLBank#(
         );
         // send DMA resp
         doAssert(isRqFromDma(cRq.id), "cRq should be DMA req");
-        doAssert(cRq.byteEn != replicate(False) && cRq.toState == M,
+        doAssert(cRq.byteEn != replicate(replicate(False)) && cRq.toState == M,
             "cRq should be DMA write"
         );
         dmaRqIdT dmaId = getIdFromDma(cRq.id);
@@ -687,9 +700,9 @@ module mkLLBank#(
         cRqT cRq = cRqMshr.sendRsToDmaC.getRq(n);
         Maybe#(Line) rsData = cRqMshr.sendRsToDmaC.getData(n);
        if (verbose)
-        $display("%t LL %m sendRsToC: ", $time, 
-            fshow(n), " ; ", 
-            fshow(cRq), " ; ", 
+        $display("%t LL %m sendRsToC: ", $time,
+            fshow(n), " ; ",
+            fshow(cRq), " ; ",
             fshow(rsData), " ; ",
             fshow(toState)
         );
@@ -719,7 +732,7 @@ module mkLLBank#(
     // round robin select cRq to downgrade child
     // but downgrade must wait for all upgrade resp
     Reg#(cRqIndexT) whichCRq <- mkReg(0);
-    
+
     // we don't perform sending downgrade to child for a cRq processing by pipelineResp_cRs
     // otherwise atomicity issue may arise
     // for safety, we check cRq processed by all pipelineResp_xxx rules
@@ -757,7 +770,7 @@ module mkLLBank#(
         cRqT cRq = cRqMshr.sendRqToC.getRq(n);
         cRqSlotT cSlot = cRqMshr.sendRqToC.getSlot(n);
         LLCRqState cState = cRqMshr.sendRqToC.getState(n);
-        doAssert(cState == WaitSt || cState == WaitOldTag, 
+        doAssert(cState == WaitSt || cState == WaitOldTag,
             "only WaitSt and WaitOldTag needs req child"
         );
         // find a child to downgrade
@@ -828,7 +841,7 @@ module mkLLBank#(
     function Action cRqFromCHit(cRqIndexT n, cRqT cRq, Bool isMRs);
     action
        if (verbose)
-        $display("%t LL %m pipelineResp: cRq from child Hit func: ", $time, 
+        $display("%t LL %m pipelineResp: cRq from child Hit func: ", $time,
             fshow(n), " ; ",
             fshow(cRq)
         );
@@ -836,7 +849,7 @@ module mkLLBank#(
         doAssert(isRqFromC(cRq.id), "should be cRq from child");
         doAssert(ram.info.tag == getTag(cRq.addr) && ram.info.cs > I,
             // this function is called by mRs, cRq, cRs
-            // tag should match even for mRs, because 
+            // tag should match even for mRs, because
             // tag has been written into cache before sending req to parent
             ("cRqHit but tag or cs incorrect")
         );
@@ -886,7 +899,7 @@ module mkLLBank#(
     function Action cRqFromDmaHit(cRqIndexT n, cRqT cRq);
     action
        if (verbose)
-        $display("%t LL %m pipelineResp: cRq from dma Hit func: ", $time, 
+        $display("%t LL %m pipelineResp: cRq from dma Hit func: ", $time,
             fshow(n), " ; ",
             fshow(cRq)
         );
@@ -895,7 +908,7 @@ module mkLLBank#(
         doAssert(ram.info.tag == getTag(cRq.addr) && ram.info.cs > I,
             "cRqHit but tag or cs incorrect"
         );
-        doAssert((cRq.byteEn != replicate(False)) == (cRq.toState == M), "toState should match byteEn");
+        doAssert((cRq.byteEn != replicate(replicate(False))) == (cRq.toState == M), "toState should match byteEn");
         // update cs (may have E -> M)
         Msi newCs = ram.info.cs;
         if(cRq.toState == M) begin
@@ -903,7 +916,7 @@ module mkLLBank#(
         end
         // update cache line
         Maybe#(Line) wrData = cRqMshr.pipelineResp.getData(n);
-        doAssert(isValid(wrData) == (cRq.byteEn != replicate(False)),
+        doAssert(isValid(wrData) == (cRq.byteEn != replicate(replicate(False))),
             "dma write should carry valid data"
         );
         Line newLine = getUpdatedLine(ram.line, cRq.byteEn, validValue(wrData));
@@ -999,7 +1012,7 @@ module mkLLBank#(
         cRqT cRq = pipeOutCRq;
        if (verbose)
         $display("%t LL %m pipelineResp: cRq: ", $time, fshow(n), " ; ", fshow(cRq));
-        
+
         // find end of dependency chain
         Maybe#(cRqIndexT) cRqEOC = cRqMshr.pipelineResp.searchEndOfChain(cRq.addr);
 
@@ -1141,7 +1154,7 @@ module mkLLBank#(
             end
         endaction
         endfunction
-    
+
         // function to set cRq to Depend, and make no further change to cache
         function Action cRqSetDepNoCacheChange;
         action
@@ -1156,7 +1169,7 @@ module mkLLBank#(
                 LLCRqState cState = pipeOutCState;
                 doAssert(cState == Init, "owner is other, must first time go through tag match");
                 // tag match must be hit (because replacement algo won't give a way with owner)
-                doAssert(ram.info.cs > I && ram.info.tag == getTag(cRq.addr), 
+                doAssert(ram.info.cs > I && ram.info.tag == getTag(cRq.addr),
                     ("cRq should hit in tag match")
                 );
                 // could be two cases:
@@ -1168,7 +1181,7 @@ module mkLLBank#(
                     // add to same addr dependency
                     cRqMshr.pipelineResp.setAddrSucc(m, Valid (n));
                     cRqSetDepNoCacheChange;
-		   if (verbose)
+                   if (verbose)
                     $display("%t LL %m pipelineResp: cRq: own by other cRq, same addr dep: ", $time,
                         fshow(cOwner), " ; ", fshow(cRqEOC)
                     );
@@ -1178,7 +1191,7 @@ module mkLLBank#(
                     // add to rep dependency
                     cRqMshr.pipelineResp.setRepSucc(cOwner.mshrIdx, Valid (n));
                     cRqSetDepNoCacheChange;
-		   if (verbose)
+                   if (verbose)
                     $display("%t LL %m pipelineResp: cRq: own by other cRq, rep dep: ", $time,
                         fshow(cOwner)
                     );
@@ -1200,12 +1213,12 @@ module mkLLBank#(
                     // req from child, get dir pend
                     Vector#(childNum, DirPend) dirPend = getDirPendNonCompatForChild;
                     if(dirPend == replicate(Invalid)) begin
-		       if (verbose)
+                       if (verbose)
                         $display("%t LL %m pipelineResp: cRq from child: own by itself, hit", $time);
                         cRqFromCHit(n, cRq, False);
                     end
                     else begin
-		       if (verbose)
+                       if (verbose)
                         $display("%t LL %m pipelineResp: cRq from child: own by itself, miss no replace: ", $time,
                             fshow(dirPend)
                         );
@@ -1216,12 +1229,12 @@ module mkLLBank#(
                     // req from DMA, get dir pend
                     Vector#(childNum, DirPend) dirPend = getDirPendNonCompatForDma;
                     if(dirPend == replicate(Invalid)) begin
-		       if (verbose)
+                       if (verbose)
                         $display("%t LL %m pipelineResp: cRq from dma: own by itself, hit", $time);
                         cRqFromDmaHit(n, cRq);
                     end
                     else begin
-		       if (verbose)
+                       if (verbose)
                         $display("%t LL %m pipelineResp: cRq from dma: own by itself, miss by children: ", $time);
                         cRqFromDmaMissByChildren(dirPend);
                     end
@@ -1237,9 +1250,9 @@ module mkLLBank#(
 
             // only check for cRqEOC to append to dependency chain when firt time go through tag match
             if(cRqEOC matches tagged Valid .m &&& cState == Init) begin
-	       if (verbose)
+               if (verbose)
                 $display("%t LL %m pipelineResp: cRq: no owner, depend on cRq ", $time,
-                    fshow(cState), " ; ", 
+                    fshow(cState), " ; ",
                     fshow(cRqEOC)
                 );
                 cRqMshr.pipelineResp.setAddrSucc(m, Valid (n));
@@ -1253,12 +1266,12 @@ module mkLLBank#(
                         // No Replacement necessary, check dir
                         Vector#(childNum, DirPend) dirPend = getDirPendNonCompatForChild;
                         if(ram.info.cs > I && dirPend == replicate(Invalid)) begin
-			   if (verbose)
+                           if (verbose)
                             $display("%t LL %m pipelineResp: cRq: no owner, hit", $time);
                             cRqFromCHit(n, cRq, False);
                         end
                         else begin
-			   if (verbose)
+                           if (verbose)
                             $display("%t LL %m pipelineResp: cRq: no owner, miss no replace: ", $time,
                                 fshow(dirPend)
                             );
@@ -1268,7 +1281,7 @@ module mkLLBank#(
                     else begin
                         // need replacement, check dir
                         Vector#(childNum, DirPend) dirPend = getDirPendNonI;
-		       if (verbose)
+                       if (verbose)
                         $display("%t LL %m pipelineResp: cRq: no owner, replace: ", $time,
                             fshow(dirPend)
                         );
@@ -1289,7 +1302,7 @@ module mkLLBank#(
                     end
                     else begin
                         // miss in LLC, so req mem and req is done!
-		       if (verbose)
+                       if (verbose)
                         $display("%t LL %m pipelineResp: cRq from dma: no owner, miss req mem", $time);
                         toMInfoQ.enq(ToMemInfo {
                             mshrIdx: n,
@@ -1355,7 +1368,7 @@ module mkLLBank#(
             cRqT cRq = pipeOutCRq;
             cRqSlotT cSlot = pipeOutCSlot;
             LLCRqState cState = pipeOutCState;
-	   if (verbose)
+           if (verbose)
             $display("%t LL %m pipelineResp: cRs: match cRq: ", $time,
                 fshow(cOwner), " ; ",
                 fshow(cRq), " ; ",
@@ -1380,7 +1393,7 @@ module mkLLBank#(
                     // replacement done, evict line
                     Maybe#(cRqIndexT) repSucc = pipeOutRepSucc;
                     cRqFromCEvict(cOwner.mshrIdx, cRq, repSucc);
-		   if (verbose)
+                   if (verbose)
                     $display("%t LL %m pipelineResp: cRs: match cRq: replace done: ", $time,
                         fshow(repSucc)
                     );
@@ -1394,7 +1407,7 @@ module mkLLBank#(
                         waitP: cSlot.waitP,
                         dirPend: newDirPend
                     });
-		   if (verbose)
+                   if (verbose)
                     $display("%t LL %m pipelineResp: cRs: match cRq: replace not done: ", $time,
                         fshow(newDirPend)
                     );
@@ -1419,7 +1432,7 @@ module mkLLBank#(
                         end
                     end
                 endcase
-	       if (verbose)
+               if (verbose)
                 $display("%t LL %m pipelineResp: cRs: match cRq: cRq in WaitSt: ", $time,
                     fshow(newDirPend)
                 );
@@ -1446,7 +1459,7 @@ module mkLLBank#(
         end
         else begin
             // does not match any cRq, so just deq pipe & write ram
-	   if (verbose)
+           if (verbose)
             $display("%t LL %m pipelineResp: cRs: no owner: ", $time);
             pipeline.deqWrite(Invalid, ram, False);
         end
@@ -1497,7 +1510,7 @@ module mkLLBank#(
 `else
         noAction;
 `endif
-    endmethod 
+    endmethod
 
     method Data getPerfData(LLCPerfType t);
         return (case(t)

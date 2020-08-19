@@ -36,11 +36,12 @@ import Cur_Cycle :: *;
 import ISA_Decls :: *;
 
 import MMU_Cache_Common :: *;
-import AXI4_Types       :: *;
+import AXI4             :: *;
 import Fabric_Defs      :: *;
+import Cache_Decls      :: *;
 
 `ifdef INCLUDE_DMEM_SLAVE
-import AXI4_Lite_Types :: *;
+import AXI4_Lite        :: *;
 `endif
 
 // ================================================================
@@ -48,34 +49,14 @@ import AXI4_Lite_Types :: *;
 
 // Id of requestor for 'coherent DMA' port into (optional) L2 cache
 
-typedef 16   Wd_Id_Dma;
-typedef 64   Wd_Addr_Dma;
-typedef 512  Wd_Data_Dma;
-typedef 0    Wd_User_Dma;
-
-// ================================================================
-// This part of the interface is lifted out to surrounding modules.
-
-`ifdef MEM_512b
-
-typedef 16   Wd_Id_Mem;
-typedef 64   Wd_Addr_Mem;
-typedef 512  Wd_Data_Mem;
-typedef 0    Wd_User_Mem;
-
-`else
-
-typedef Wd_Id    Wd_Id_Mem;
-typedef Wd_Addr  Wd_Addr_Mem;
-typedef Wd_Data  Wd_Data_Mem;
-typedef Wd_User  Wd_User_Mem;
-
-`endif
-
-typedef AXI4_Master_IFC #(Wd_Id_Mem,
-			  Wd_Addr_Mem,
-			  Wd_Data_Mem,
-			  Wd_User_Mem)  Near_Mem_Fabric_IFC;
+typedef 6   Wd_Id_Dma;
+typedef 64  Wd_Addr_Dma;
+typedef 512 Wd_Data_Dma;
+typedef 0   Wd_AW_User_Dma;
+typedef 0   Wd_W_User_Dma;
+typedef 0   Wd_B_User_Dma;
+typedef 0   Wd_AR_User_Dma;
+typedef 0   Wd_R_User_Dma;
 
 // ================================================================
 
@@ -90,7 +71,9 @@ interface Near_Mem_IFC;
    interface IMem_IFC  imem;
 
    // Fabric side
-   interface AXI4_Master_IFC #(Wd_Id, Wd_Addr, Wd_Data, Wd_User) imem_master;
+   interface AXI4_Master #( Wd_MId, Wd_Addr, Wd_Data
+                          , Wd_AW_User, Wd_W_User, Wd_B_User
+                          , Wd_AR_User, Wd_R_User) imem_master;
 
    // ----------------
    // DMem
@@ -99,7 +82,10 @@ interface Near_Mem_IFC;
    interface DMem_IFC  dmem;
 
    // Fabric side
-   interface Near_Mem_Fabric_IFC  mem_master;
+   //interface AXI4_Master #( Wd_MId_2x3, Wd_Addr, Wd_Data
+   //                       , Wd_AW_User, Wd_W_User, Wd_B_User
+   //                       , Wd_AR_User, Wd_R_User) mem_master;
+   interface Near_Mem_Fabric_IFC mem_master;
 
    // ----------------------------------------------------------------
    // Optional AXI4-Lite DMem slave interface
@@ -122,7 +108,9 @@ interface Near_Mem_IFC;
    // ----------------------------------------------------------------
    // Interface to 'coherent DMA' port of optional L2 cache
 
-   interface AXI4_Slave_IFC #(Wd_Id_Dma, Wd_Addr_Dma, Wd_Data_Dma, Wd_User_Dma)  dma_server;
+   interface AXI4_Slave #( Wd_Id_Dma, Wd_Addr_Dma, Wd_Data_Dma
+                         , Wd_AW_User_Dma, Wd_W_User_Dma, Wd_B_User_Dma
+                         , Wd_AR_User_Dma, Wd_R_User_Dma)  dma_server;
 
    // ----------------------------------------------------------------
    // Misc. control and status
@@ -143,7 +131,7 @@ interface Near_Mem_IFC;
    method Bit #(8) mv_status;
 
 endinterface
-   
+
 // ================================================================
 // Cache flush specs
 
@@ -163,6 +151,7 @@ interface IMem_IFC;
 		       Bit #(1)   sstatus_SUM,
 		       Bit #(1)   mstatus_MXR,
 		       WordXL     satp);    // { VM_Mode, ASID, PPN_for_page_table }
+   (* always_ready *)  method Action commit;
 
    // CPU side: IMem response
    (* always_ready *)  method Bool     valid;
@@ -182,118 +171,26 @@ interface DMem_IFC;
    (* always_ready *)
    method Action  req (CacheOp op,
 		       Bit #(3) f3,
+               Bool is_unsigned,
 `ifdef ISA_A
-		       Bit #(7) amo_funct7,
+		       Bit #(5) amo_funct5,
 `endif
-		       WordXL addr,
-		       Bit #(64) store_value,
+		       Addr addr,
+               Tuple2#(Bool, Bit #(128)) store_value,
 		       // The following  args for VM
 		       Priv_Mode  priv,
 		       Bit #(1)   sstatus_SUM,
 		       Bit #(1)   mstatus_MXR,
 		       WordXL     satp);    // { VM_Mode, ASID, PPN_for_page_table }
+   (* always_ready *)  method Action commit;
 
    // CPU side: DMem response
    (* always_ready *)  method Bool       valid;
-   (* always_ready *)  method Bit #(64)  word64;      // Load-value
-   (* always_ready *)  method Bit #(64)  st_amo_val;  // Final store-value for ST, SC, AMO
+   (* always_ready *)  method Tuple2#(Bool, Bit #(128))  word128;      // Load-value
+   (* always_ready *)  method Tuple2#(Bool, Bit #(128))  st_amo_val;  // Final store-value for ST, SC, AMO
    (* always_ready *)  method Bool       exc;
    (* always_ready *)  method Exc_Code   exc_code;
 endinterface
-
-// ================================================================
-// Extract bytes from raw word read from near-mem.
-// The bytes of interest are offset according to LSBs of addr.
-// Arguments:
-//  - a RISC-V LD/ST f3 value (encoding LB, LH, LW, LD, LBU, LHU, LWU)
-//  - a byte-address
-//  - a load-word (loaded from cache/mem)
-// result:
-//  - word with correct byte(s) shifted into LSBs and properly extended
-
-function Bit #(64) fn_extract_and_extend_bytes (Bit #(3) f3, WordXL byte_addr, Bit #(64) word64);
-   Bit #(64) result    = 0;
-   Bit #(3)  addr_lsbs = byte_addr [2:0];
-
-   case (f3)
-      f3_LB: case (addr_lsbs)
-		'h0: result = signExtend (word64 [ 7: 0]);
-		'h1: result = signExtend (word64 [15: 8]);
-		'h2: result = signExtend (word64 [23:16]);
-		'h3: result = signExtend (word64 [31:24]);
-		'h4: result = signExtend (word64 [39:32]);
-		'h5: result = signExtend (word64 [47:40]);
-		'h6: result = signExtend (word64 [55:48]);
-		'h7: result = signExtend (word64 [63:56]);
-	     endcase
-      f3_LBU: case (addr_lsbs)
-		'h0: result = zeroExtend (word64 [ 7: 0]);
-		'h1: result = zeroExtend (word64 [15: 8]);
-		'h2: result = zeroExtend (word64 [23:16]);
-		'h3: result = zeroExtend (word64 [31:24]);
-		'h4: result = zeroExtend (word64 [39:32]);
-		'h5: result = zeroExtend (word64 [47:40]);
-		'h6: result = zeroExtend (word64 [55:48]);
-		'h7: result = zeroExtend (word64 [63:56]);
-	     endcase
-
-      f3_LH: case (addr_lsbs)
-		'h0: result = signExtend (word64 [15: 0]);
-		'h2: result = signExtend (word64 [31:16]);
-		'h4: result = signExtend (word64 [47:32]);
-		'h6: result = signExtend (word64 [63:48]);
-	     endcase
-      f3_LHU: case (addr_lsbs)
-		'h0: result = zeroExtend (word64 [15: 0]);
-		'h2: result = zeroExtend (word64 [31:16]);
-		'h4: result = zeroExtend (word64 [47:32]);
-		'h6: result = zeroExtend (word64 [63:48]);
-	     endcase
-
-      f3_LW: case (addr_lsbs)
-		'h0: result = signExtend (word64 [31: 0]);
-		'h4: result = signExtend (word64 [63:32]);
-	     endcase
-      f3_LWU: case (addr_lsbs)
-		'h0: result = zeroExtend (word64 [31: 0]);
-		'h4: result = zeroExtend (word64 [63:32]);
-	     endcase
-
-      f3_LD: case (addr_lsbs)
-		'h0: result = word64;
-	     endcase
-   endcase
-   return result;
-endfunction
-
-// ================================================================
-// Extract bytes from word read from fabric.
-// The bytes of interest are already in the LSBs of 'word',
-// they just have to be suitably extended.
-// Arguments:
-//  - a RISC-V LD/ST f3 value (encoding LB, LH, LW, LD, LBU, LHU, LWU)
-//  - a byte-address
-//  - a load-word (loaded from fabric)
-// result:
-//  - word with correct byte(s), properly extended.
-
-function Bit #(64) fn_extend_bytes (Bit #(3) f3, Bit #(64) word64);
-   Bit #(64) result = 0;
-   case (f3)
-      f3_LB:  result = signExtend (word64 [ 7: 0]);
-      f3_LBU: result = zeroExtend (word64 [ 7: 0]);
-
-      f3_LH:  result = signExtend (word64 [15: 0]);
-      f3_LHU: result = zeroExtend (word64 [15: 0]);
-
-      f3_LW:  result = signExtend (word64 [31: 0]);
-      f3_LWU: result = zeroExtend (word64 [31: 0]);
-
-      f3_LD:  result = word64;
-   endcase
-
-   return result;
-endfunction
 
 // ================================================================
 

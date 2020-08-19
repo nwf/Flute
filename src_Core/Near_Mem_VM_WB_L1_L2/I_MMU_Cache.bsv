@@ -65,6 +65,7 @@ import Near_Mem_IFC :: *;
 
 import SoC_Map :: *;
 
+import Cache_Decls      :: *;
 import MMU_Cache_Common :: *;
 
 `ifdef ISA_PRIV_S
@@ -91,11 +92,12 @@ interface I_MMU_Cache_IFC;
 			  Bit #(1)   sstatus_SUM,
 			  Bit #(1)   mstatus_MXR,
 			  WordXL     satp);    // { VM_Mode, ASID, PPN_for_page_table }
+   (* always_ready *)  method Action     commit;
 
    // CPU interface: response
    (* always_ready *)  method Bool       valid;
-   (* always_ready *)  method WordXL     addr;        // req addr for which this is a response
-   (* always_ready *)  method Bit #(64)  word64;      // rd_val (instruction)
+   (* always_ready *)  method WordXL     addr;  // req addr for which this is a response
+   (* always_ready *)  method Bit #(64)  inst;  // rd_val (instruction)
    (* always_ready *)  method Bool       exc;
    (* always_ready *)  method Exc_Code   exc_code;
 
@@ -184,7 +186,7 @@ endfunction
 
 // ================================================================
 // MODULE IMPLEMENTATION
-                
+
 (* synthesize *)
 module mkI_MMU_Cache (I_MMU_Cache_IFC);
 
@@ -231,10 +233,10 @@ module mkI_MMU_Cache (I_MMU_Cache_IFC);
    // ----------------------------------------------------------------
    // Outputs from this module
 
-   Reg #(Bool)      crg_valid [2]        <- mkCReg (2, False);
-   Reg #(Bool)      crg_exc [2]          <- mkCRegU (2);
-   Reg #(Exc_Code)  crg_exc_code [2]     <- mkCRegU (2);
-   Reg #(Bit #(64)) crg_ld_val [2]       <- mkCRegU (2);  // Load-val (instruction)
+   Reg #(Bool)      crg_valid [2]    <- mkCReg (2, False);
+   Reg #(Bool)      crg_exc [2]      <- mkCRegU (2);
+   Reg #(Exc_Code)  crg_exc_code [2] <- mkCRegU (2);
+   Reg #(Bit #(64)) crg_ld_val [2]   <- mkCRegU (2);  // Load-val (instruction)
 
    // ****************************************************************
    // ****************************************************************
@@ -318,6 +320,7 @@ module mkI_MMU_Cache (I_MMU_Cache_IFC);
    VM_Xlate_Result vm_xlate_result = tlb.mv_vm_xlate (crg_mmu_cache_req [0].va,
 						      crg_mmu_cache_req [0].satp,
 						      True,     // read_not_write
+                                                      False,    // No cap
 						      crg_mmu_cache_req [0].priv,
 						      crg_mmu_cache_req [0].sstatus_SUM,
 						      crg_mmu_cache_req [0].mstatus_MXR);
@@ -341,7 +344,7 @@ module mkI_MMU_Cache (I_MMU_Cache_IFC);
       if (verbosity >= 3)
 	 $display ("    ", fshow_VM_Xlate_Result (vm_xlate_result));
 
-      if (! fn_is_aligned (mmu_cache_req.f3 [1:0], mmu_cache_req.va)) begin
+      if (! fn_is_aligned (mmu_cache_req.width_code, mmu_cache_req.va)) begin
 	 // Misaligned accesses not supported
 	 crg_valid [0]               <= True;
 	 crg_exc [0]                 <= True;
@@ -417,8 +420,8 @@ module mkI_MMU_Cache (I_MMU_Cache_IFC);
 		  $display ("    Cache Miss: waiting for refill -> STATE_MAIN_CACHE_WAIT");
 	    end
 	    else begin    // Cache hit
-	       crg_exc [0]          <= False;
-	       crg_ld_val [0]       <= cache_result.final_ld_val;
+	       crg_exc [0]    <= False;
+               crg_ld_val [0] <= truncate (tpl_2 (cache_result.final_ld_val));
 
 	       if (cache_result.outcome == CACHE_READ_HIT) begin
 		  // Consume request and drive response immediately
@@ -492,7 +495,11 @@ module mkI_MMU_Cache (I_MMU_Cache_IFC);
       end
 
       crg_valid [0]               <= True;
-      crg_ld_val [0]              <= ld_val;
+	  Vector #(TDiv #(Bits_per_CWord, SizeOf #(WordXL)), WordXL) respWordXL =
+         unpack (ld_val);
+      Bit #(TLog #(TDiv #(Bits_per_CWord, SizeOf #(WordXL)))) idx =
+         truncate (crg_mmu_cache_req[0].va >> valueOf (TLog #(SizeOf #(WordXL))));
+      crg_ld_val [0]              <= respWordXL [idx];
       crg_exc [0]                 <= err;
       crg_exc_code [0]            <= fv_exc_code_access_fault (crg_mmu_cache_req [0]);
       crg_mmu_cache_req_state [0] <= REQ_STATE_EMPTY;
@@ -583,11 +590,13 @@ module mkI_MMU_Cache (I_MMU_Cache_IFC);
 			 WordXL     satp);         // = { VM_Mode, ASID, PPN_for_page_table }
 
       let mmu_cache_req = MMU_Cache_Req {op:          CACHE_LD,
-					 f3:          3'b010,    // = 'W' (32-bit word)
+					 width_code:  3'b010,    // = 'W' (32-bit word)
+                     is_unsigned: True,
+                     is_cap:      False,
 					 va:          va,
 					 st_value:    ?
 `ifdef ISA_A
-				       , amo_funct7:  ?
+				       , amo_funct5:  ?
 `endif
 `ifdef ISA_PRIV_S
 				       , priv:        priv,
@@ -598,6 +607,7 @@ module mkI_MMU_Cache (I_MMU_Cache_IFC);
 					 };
       wire_mmu_cache_req <= mmu_cache_req;
    endmethod
+   method commit = noAction;
 
    method Bool  valid;
       return crg_valid [1];
@@ -607,7 +617,7 @@ module mkI_MMU_Cache (I_MMU_Cache_IFC);
       return crg_mmu_cache_req [0].va;
    endmethod
 
-   method Bit #(64)  word64;
+   method inst;
       return crg_ld_val [1];
    endmethod
 

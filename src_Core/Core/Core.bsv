@@ -367,6 +367,7 @@ module mkCore (Core_IFC #(N_External_Interrupt_Sources));
            AXI4_Master#( Wd_MId_2x3, Wd_Addr, Wd_Data
                        , Wd_AW_User, Wd_W_User, Wd_B_User
                        , Wd_AR_User, Wd_R_User)) master_vector = newVector;
+   //Vector#(Num_Masters_2x3, Near_Mem_Fabric_IFC) master_vector = newVector;
    master_vector[cpu_dmem_master_num]         = cpu.mem_master;
    master_vector[debug_module_sba_master_num] = dm_master_local;
 

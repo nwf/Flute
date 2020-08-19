@@ -51,6 +51,7 @@ interface TLB_IFC;
    method VM_Xlate_Result  mv_vm_xlate (WordXL             va,
 					WordXL             satp,
 					Bool               read_not_write,
+                    Bool               cap,
 					Priv_Mode          priv,
 					Bit #(1)           sstatus_SUM,
 					Bit #(1)           mstatus_MXR);
@@ -82,86 +83,82 @@ deriving (Bits, FShow);
 // ================================================================
 // This function does all the translation work, based on result of TLB probe
 
-function VM_Xlate_Result  fv_vm_xlate (WordXL             va,
+function VM_Xlate_Result  fv_vm_xlate (WordXL             addr,
 				       WordXL             satp,
 				       Bool               dmem_not_imem,
 				       Bool               read_not_write,
+					   Bool               capability,
 				       Priv_Mode          priv,
 				       Bit #(1)           sstatus_SUM,
 				       Bit #(1)           mstatus_MXR,
 				       TLB_Lookup_Result  tlb_result);
       // Translate if in VM mode (sv32, sv39), and priv <= s_Priv_Mode
-      // Default PA (no translation) = va
+      // Default PA (no translation) = addr
 
 `ifdef RV32
       Bool xlate = ((priv <= s_Priv_Mode) && (fn_satp_to_VM_Mode (satp) == satp_mode_RV32_sv32));
-      PA   pa    = zeroExtend (va);
+      PA   pa    = zeroExtend (addr);
 `elsif SV39
       Bool xlate = ((priv <= s_Priv_Mode) && (fn_satp_to_VM_Mode (satp) == satp_mode_RV64_sv39));
-      PA   pa    = truncate (va);
+      PA   pa    = truncate (addr);
 `endif
 
-      VM_Xlate_Outcome  outcome      = VM_XLATE_OK;
-      Exc_Code          exc_code     = ?;
-      Bool              pte_modified = False;
-      PTE               pte          = tlb_result.pte;
+      VM_Xlate_Outcome   outcome      = VM_XLATE_OK;
+      Bool               allow_cap    = True;
+      Bool               pte_modified = False;
+      PTE                pte          = tlb_result.pte;
+
+      match { .pte_fault, .exc_code } = is_pte_fault (dmem_not_imem, read_not_write, capability, priv, sstatus_SUM, mstatus_MXR, pte);
 
       if (xlate) begin
-	 if (tlb_result.hit) begin
-	    Bool deny = is_pte_denial (dmem_not_imem, read_not_write, priv, sstatus_SUM, mstatus_MXR, pte);
-	    if (deny) begin
-	       outcome = VM_XLATE_EXCEPTION;
-	       exc_code = fn_page_fault_exc_code (dmem_not_imem, read_not_write);
-	    end
+	 if (tlb_result.pte_level == 0)
+	    pa = zeroExtend ({fn_PTE_to_PPN (pte),
+			      fn_Addr_to_Offset (addr) });
 
-	    else if (is_pte_A_D_fault (read_not_write, pte)) begin
-	       // TODO: we're handling PTE updates and writebacks, so remove this?
-	       outcome = VM_XLATE_EXCEPTION;
-	       exc_code = fn_page_fault_exc_code (dmem_not_imem, read_not_write);
-	    end
-
-	    else begin
-	       if (tlb_result.pte_level == 0)
-		  pa = zeroExtend ({fn_PTE_to_PPN (pte),
-				    fn_Addr_to_Offset (va) });
-
-	       else if (tlb_result.pte_level == 1)
-		  pa = zeroExtend ({fn_PTE_to_PPN_mega (pte),
-				    fn_Addr_to_VPN_0 (va),
-				    fn_Addr_to_Offset (va) });
+	 else if (tlb_result.pte_level == 1)
+	    pa = zeroExtend ({fn_PTE_to_PPN_mega (pte),
+			      fn_Addr_to_VPN_0 (addr),
+			      fn_Addr_to_Offset (addr) });
 `ifdef SV39
-	       else if (tlb_result.pte_level == 2)
-		  pa = zeroExtend ({fn_PTE_to_PPN_giga (pte),
-				    fn_Addr_to_VPN_1 (va),
-				    fn_Addr_to_VPN_0 (va),
-				    fn_Addr_to_Offset (va) });
+	 else if (tlb_result.pte_level == 2)
+	    pa = zeroExtend ({fn_PTE_to_PPN_giga (pte),
+			      fn_Addr_to_VPN_1 (addr),
+			      fn_Addr_to_VPN_0 (addr),
+			      fn_Addr_to_Offset (addr) });
 `endif
 
-	       // $display ("    fav_vm_xlate: PTE.A = %0d", fn_PTE_to_A (pte));
-	       if (fn_PTE_to_A (pte) == 1'b0) begin
-		  pte_modified = True;
-		  WordXL tmp = 1;
-		  pte = (pte | (tmp << pte_A_offset));
-	       end
+	 // $display ("    fav_vm_xlate: PTE.A = %0d", fn_PTE_to_A (pte));
+	 if (fn_PTE_to_A (pte) == 1'b0) begin
+	    pte_modified = True;
+	    WordXL tmp = 1;
+	    pte = (pte | (tmp << pte_A_offset));
+	 end
 
-	       // $display ("    fav_vm_xlate: PTE.D = %0d  read = %0d", fn_PTE_to_D (pte), pack (read_not_write));
-	       if ((fn_PTE_to_D (pte) == 1'b0) && (! read_not_write)) begin
-		  pte_modified = True;
-		  WordXL tmp = 1;
-		  pte = (pte | (tmp << pte_D_offset));
-	       end
+	 // $display ("    fav_vm_xlate: PTE.D = %0d  read = %0d", fn_PTE_to_D (pte), pack (read_not_write));
+	 if ((fn_PTE_to_D (pte) == 1'b0) && (! read_not_write)) begin
+	    pte_modified = True;
+	    WordXL tmp = 1;
+	    pte = (pte | (tmp << pte_D_offset));
+	 end
+
+	 if (fn_PTE_to_LoadCap (pte) == 1'b0)
+	    allow_cap = False;
+
+	 if (tlb_result.hit) begin
+	    if (pte_fault) begin
+	       outcome = VM_XLATE_EXCEPTION;
+	       // $display ("fav_vm_xlate: page fault due to pte_denial");
 	    end
 	 end
 	 else
 	    outcome = VM_XLATE_TLB_MISS;
       end
       return VM_Xlate_Result {outcome:      outcome,
+			      allow_cap:    allow_cap,
 			      pa:           pa,
 			      exc_code:     exc_code,
 			      pte_modified: pte_modified,
-			      pte:          pte,
-			      pte_level:    tlb_result.pte_level,
-			      pte_pa:       tlb_result.pte_pa};
+			      pte:          pte};
 endfunction: fv_vm_xlate
 
 // ================================================================
@@ -371,6 +368,7 @@ module mkTLB #(parameter Bool      dmem_not_imem,
    method VM_Xlate_Result  mv_vm_xlate (WordXL             va,
 					WordXL             satp,
 					Bool               read_not_write,
+                    Bool               cap,
 					Priv_Mode          priv,
 					Bit #(1)           sstatus_SUM,
 					Bit #(1)           mstatus_MXR);
@@ -412,7 +410,7 @@ module mkTLB #(parameter Bool      dmem_not_imem,
 
       // Translate, based on TLB probe
       VM_Xlate_Result   result = fv_vm_xlate (va, satp, dmem_not_imem, read_not_write,
-					      priv, sstatus_SUM, mstatus_MXR, tlb_result);
+					      cap, priv, sstatus_SUM, mstatus_MXR, tlb_result);
       return result;
    endmethod
 
